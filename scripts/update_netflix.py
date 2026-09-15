@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Streaming Tops updater v2.3.0
+Streaming Tops updater v2.3.1
 
 Stable free sources:
 1) Netflix official weekly country charts:
@@ -100,10 +100,6 @@ fragment TitleDetails on MovieOrShowOrSeasonOrEpisode {
   content(country: $country, language: $language) {
     title
     originalReleaseYear
-    genres {
-      shortName
-      translation(language: $language)
-    }
   }
 }
 """
@@ -175,7 +171,7 @@ def graphql(
         data=payload,
         headers={
             "Content-Type": "application/json",
-            "User-Agent": "streaming-tops-lampa/2.3.0",
+            "User-Agent": "streaming-tops-lampa/2.3.1",
             "Accept": "application/json",
         },
         method="POST",
@@ -296,39 +292,23 @@ def get_popular(
         if not title:
             continue
 
-        genre_names: list[str] = []
-        for genre in content.get("genres") or []:
-            name = (
-                (genre or {}).get("translation")
-                or (genre or {}).get("shortName")
-                or ""
-            )
-            if name and name not in genre_names:
-                genre_names.append(str(name))
-
         rows.append({
             "rank": len(rows) + 1,
             "title": title,
             "search_title": title,
             "year": content.get("originalReleaseYear"),
             "justwatch_id": node.get("id"),
-            "genres": genre_names,
         })
 
     return rows
 
 
-def is_documentary(item: dict[str, Any]) -> bool:
-    genres = " ".join(str(x) for x in (item.get("genres") or [])).lower()
-    return "documentary" in genres or "documental" in genres
-
-
-DOC_CATEGORY_RULES = {
-    "crime": ("crime",),
-    "history": ("history",),
-    "music": ("music",),
-    "sport": ("sport", "sports"),
-    "war": ("war",),
+DOC_CATEGORY_CODES = {
+    "crime": "crm",
+    "history": "hst",
+    "music": "msc",
+    "sport": "spt",
+    "war": "war",
 }
 
 
@@ -343,6 +323,38 @@ def browse_copy(items: list[dict[str, Any]], limit: int = 50) -> list[dict[str, 
     return result
 
 
+def title_identity(item: dict[str, Any]) -> str:
+    """
+    JustWatch id is best. Title+year fallback keeps the intersection robust
+    if an API row ever arrives without an id.
+    """
+    jw_id = str(item.get("justwatch_id") or "").strip()
+    if jw_id:
+        return "id:" + jw_id
+
+    return "title:" + str(item.get("title") or "").strip().casefold() + "|" + str(
+        item.get("year") or ""
+    )
+
+
+def intersect_catalogs(
+    documentaries: list[dict[str, Any]],
+    genre_items: list[dict[str, Any]],
+    limit: int = 40,
+) -> list[dict[str, Any]]:
+    """
+    Intersect a Documentary-filtered result set with a second genre-filtered
+    result set. This avoids relying on whether JustWatch interprets
+    genres=["doc","crm"] as AND or OR.
+    """
+    genre_ids = {title_identity(item) for item in genre_items}
+    result = [
+        item for item in documentaries
+        if title_identity(item) in genre_ids
+    ]
+    return browse_copy(result, limit)
+
+
 def documentary_catalog(
     country: str,
     package_id: str,
@@ -350,49 +362,69 @@ def documentary_catalog(
     tv_catalog: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """
-    Prefer JustWatch's historical/current documentary genre code `doc`.
-    If that filter ever stops working, fall back to documentary titles found
-    in the provider's larger popularity sample.
+    Documentary lists are fetched directly with JustWatch's Documentary
+    genre short code `doc`.
+
+    Subcategories are built as set intersections:
+      Documentary ∩ Crime
+      Documentary ∩ History
+      Documentary ∩ Music
+      Documentary ∩ Sport
+      Documentary ∩ War & Military
+
+    This requires no genre fields in the GraphQL response itself.
     """
-    direct_movies: list[dict[str, Any]] = []
-    direct_tv: list[dict[str, Any]] = []
+    try:
+        doc_movies = get_popular(
+            country,
+            package_id,
+            ["MOVIE"],
+            "POPULAR",
+            count=70,
+            genres=["doc"],
+        )
+    except Exception as exc:
+        print(f"  documentary movies unavailable: {exc}")
+        doc_movies = []
 
     try:
-        direct_movies = get_popular(
-            country, package_id, ["MOVIE"], "POPULAR", count=60, genres=["doc"]
+        doc_tv = get_popular(
+            country,
+            package_id,
+            ["SHOW"],
+            "POPULAR",
+            count=70,
+            genres=["doc"],
         )
-        direct_movies = [x for x in direct_movies if is_documentary(x)]
     except Exception as exc:
-        print(f"  documentary movie genre filter fallback: {exc}")
+        print(f"  documentary TV unavailable: {exc}")
+        doc_tv = []
 
-    try:
-        direct_tv = get_popular(
-            country, package_id, ["SHOW"], "POPULAR", count=60, genres=["doc"]
-        )
-        direct_tv = [x for x in direct_tv if is_documentary(x)]
-    except Exception as exc:
-        print(f"  documentary TV genre filter fallback: {exc}")
+    # If the genre endpoint temporarily fails, do not guess documentaries
+    # from the normal catalog; simply omit the documentary browser for that
+    # provider until the next successful daily refresh.
+    movies = browse_copy(doc_movies, 50)
+    tv = browse_copy(doc_tv, 50)
 
-    if len(direct_movies) < 5:
-        direct_movies = [x for x in movies_catalog if is_documentary(x)]
-
-    if len(direct_tv) < 5:
-        direct_tv = [x for x in tv_catalog if is_documentary(x)]
-
-    movies = browse_copy(direct_movies, 50)
-    tv = browse_copy(direct_tv, 50)
-
-    combined = movies + tv
+    all_docs = doc_movies + doc_tv
     categories: dict[str, list[dict[str, Any]]] = {}
 
-    for key, words in DOC_CATEGORY_RULES.items():
-        matches = []
-        for item in combined:
-            genre_text = " ".join(str(x) for x in (item.get("genres") or [])).lower()
-            if any(word in genre_text for word in words):
-                matches.append(item)
-        if matches:
-            categories[key] = matches[:40]
+    if all_docs:
+        for key, genre_code in DOC_CATEGORY_CODES.items():
+            try:
+                genre_items = get_popular(
+                    country,
+                    package_id,
+                    ["MOVIE", "SHOW"],
+                    "POPULAR",
+                    count=100,
+                    genres=[genre_code],
+                )
+                matches = intersect_catalogs(all_docs, genre_items, 40)
+                if matches:
+                    categories[key] = matches
+            except Exception as exc:
+                print(f"  documentary category {key} unavailable: {exc}")
 
     return {
         "movies": movies,
@@ -685,7 +717,7 @@ def main() -> None:
     payload = {
         "schema": 4,
         "generated": True,
-        "version": "2.3.0",
+        "version": "2.3.1",
         "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "source": "Netflix Tudum + JustWatch public GraphQL + JustWatch streamingCharts",
         "source_note": (
