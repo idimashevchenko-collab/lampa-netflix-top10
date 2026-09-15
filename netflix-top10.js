@@ -1,6 +1,6 @@
 /*!
  * Netflix Top 10 Native Cards for Lampa
- * Version: 1.0.0
+ * Version: 1.0.1
  *
  * Ranking source: official Netflix Tudum Top 10 datasets.
  * Metadata/posters: Lampa built-in TMDB source (no extra API key required).
@@ -13,7 +13,7 @@
     if (window.netflix_top10_native_ready) return;
     window.netflix_top10_native_ready = true;
 
-    var VERSION = '1.0.0';
+    var VERSION = '1.0.1';
     var COMPONENT = 'netflix_top10_native';
     var SETTINGS_COMPONENT = 'netflix_top10_native_settings';
     var CACHE_KEY = 'netflix_top10_tmdb_cache_v1';
@@ -778,27 +778,97 @@
         }
     }
 
-    function addMenu() {
-        if (!Lampa.Menu || !Lampa.Menu.addButton) return;
+    function openNetflixSection() {
+        Lampa.Activity.push({
+            url: '',
+            title: 'Netflix Top 10',
+            component: COMPONENT,
+            page: 1
+        });
+    }
 
+    function menuButtonExists() {
         try {
-            var button = Lampa.Menu.addButton(
-                ICON,
-                'Netflix',
-                function () {
-                    Lampa.Activity.push({
-                        url: '',
-                        title: 'Netflix Top 10',
-                        component: COMPONENT,
-                        page: 1
-                    });
-                }
+            return !!document.querySelector(
+                '.netflix-top10-menu, .menu__item[data-action="netflix_top10"]'
+            );
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function addLegacyMenuButton() {
+        try {
+            if (menuButtonExists()) return true;
+
+            var list = $('.menu .menu__list').eq(0);
+            if (!list || !list.length) return false;
+
+            var button = $(
+                '<li class="menu__item selector netflix-top10-menu" data-action="netflix_top10">' +
+                    '<div class="menu__ico">' + ICON + '</div>' +
+                    '<div class="menu__text">Netflix</div>' +
+                '</li>'
             );
 
-            if (button && button.addClass) button.addClass('netflix-top10-menu');
+            button.on('hover:enter click', function () {
+                openNetflixSection();
+            });
+
+            list.append(button);
+
+            log('Menu button added by legacy DOM fallback');
+            return true;
         } catch (e) {
-            log('Menu error', e);
+            log('Legacy menu fallback error', e);
+            return false;
         }
+    }
+
+    function addMenu() {
+        if (menuButtonExists()) return;
+
+        /*
+         * Lampa 3.x official API.
+         * Some builds expose SettingsApi but either do not expose Menu.addButton
+         * or rebuild the menu after plugins load. Therefore we verify that the
+         * button actually reached the DOM and fall back to the classic menu DOM.
+         */
+        if (
+            !window.netflix_top10_menu_api_attempted &&
+            Lampa.Menu &&
+            typeof Lampa.Menu.addButton === 'function'
+        ) {
+            window.netflix_top10_menu_api_attempted = true;
+
+            try {
+                var button = Lampa.Menu.addButton(
+                    ICON,
+                    'Netflix',
+                    openNetflixSection
+                );
+
+                if (button && button.addClass) {
+                    button.addClass('netflix-top10-menu');
+                }
+
+                if (button && button.attr) {
+                    button.attr('data-action', 'netflix_top10');
+                }
+
+                log('Menu.addButton called');
+            } catch (e) {
+                log('Menu.addButton error', e);
+            }
+        }
+
+        /*
+         * Check on the next tick because some Lampa builds append the element
+         * asynchronously. If it is still absent, use the old reliable markup.
+         */
+        setTimeout(function () {
+            if (!menuButtonExists()) addLegacyMenuButton();
+        }, 80);
     }
 
     function startPlugin() {
@@ -816,6 +886,12 @@
         Lampa.Component.add(COMPONENT, component);
         addSettings();
         addMenu();
+
+        // Some TV builds rebuild the left menu after plugin initialization.
+        // Retry safely; duplicate protection is built into addMenu().
+        setTimeout(addMenu, 700);
+        setTimeout(addMenu, 1800);
+        setTimeout(addMenu, 4000);
 
         log('Started v' + VERSION + ', Lampa app_digital=' + appDigital());
     }
