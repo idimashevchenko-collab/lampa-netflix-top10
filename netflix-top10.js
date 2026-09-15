@@ -1,59 +1,90 @@
 /*!
- * Netflix Top 10 Native Cards for Lampa
- * Version: 1.0.1
+ * Streaming Tops for Lampa
+ * File name intentionally remains netflix-top10.js so existing install URLs do not change.
+ * Version: 2.0.0
  *
- * Ranking source: official Netflix Tudum Top 10 datasets.
- * Metadata/posters: Lampa built-in TMDB source (no extra API key required).
- *
- * Designed for Lampa 3.x (Maker API) with a legacy fallback.
+ * Daily rankings: FlixPatrol public TOP 10 pages, read by the free Jina Reader proxy.
+ * Posters/metadata: Lampa built-in TMDB source (no extra TMDB key).
  */
 (function () {
     'use strict';
 
-    if (window.netflix_top10_native_ready) return;
-    window.netflix_top10_native_ready = true;
+    if (window.streaming_tops_v2_ready) return;
+    window.streaming_tops_v2_ready = true;
 
-    var VERSION = '1.0.1';
-    var COMPONENT = 'netflix_top10_native';
-    var SETTINGS_COMPONENT = 'netflix_top10_native_settings';
-    var CACHE_KEY = 'netflix_top10_tmdb_cache_v1';
-    var COUNTRY_KEY = 'netflix_top10_country';
+    var VERSION = '2.0.0';
+    var COMPONENT = 'streaming_tops';
+    var SETTINGS_COMPONENT = 'streaming_tops_settings';
+    var REGION_KEY = 'streaming_tops_region';
+    var CACHE_KEY = 'streaming_tops_tmdb_cache_v2';
     var CACHE_TTL = 14 * 24 * 60 * 60 * 1000;
 
-    var COUNTRIES = {
+    var REGIONS = {
         UA: 'Украина',
-        US: 'США',
-        GB: 'Великобритания',
-        PL: 'Польша',
-        DE: 'Германия',
-        FR: 'Франция',
-        ES: 'Испания',
-        IT: 'Италия',
-        CA: 'Канада',
-        JP: 'Япония',
-        KR: 'Южная Корея',
-        GLOBAL: 'Global'
+        WORLD: 'Мир'
     };
+
+    var SERVICES = {
+        netflix: {
+            name: 'Netflix',
+            prefix: '🔴',
+            setting: 'streaming_tops_show_netflix'
+        },
+        hbo_max: {
+            name: 'HBO Max',
+            prefix: '🟣',
+            setting: 'streaming_tops_show_hbo'
+        },
+        prime_video: {
+            name: 'Prime Video',
+            prefix: '📦',
+            setting: 'streaming_tops_show_prime'
+        },
+        apple_tv: {
+            name: 'Apple TV',
+            prefix: '🍎',
+            setting: 'streaming_tops_show_apple'
+        },
+        disney_plus: {
+            name: 'Disney+',
+            prefix: '🏰',
+            setting: 'streaming_tops_show_disney'
+        },
+        paramount_plus: {
+            name: 'Paramount+',
+            prefix: '⛰️',
+            setting: 'streaming_tops_show_paramount'
+        }
+    };
+
+    var SERVICE_ORDER = [
+        'netflix',
+        'hbo_max',
+        'prime_video',
+        'apple_tv',
+        'disney_plus',
+        'paramount_plus'
+    ];
 
     var ICON =
         '<svg width="34" height="34" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">' +
-        '<path d="M8 4h5.1l10.8 24h-5.3L8 4z" fill="currentColor"/>' +
-        '<path d="M19 4h5v24h-5z" fill="currentColor" opacity=".48"/>' +
-        '<path d="M8 4h5v24H8z" fill="currentColor" opacity=".48"/>' +
+            '<rect x="4" y="5" width="24" height="4" rx="2" fill="currentColor"/>' +
+            '<rect x="4" y="14" width="20" height="4" rx="2" fill="currentColor" opacity=".72"/>' +
+            '<rect x="4" y="23" width="16" height="4" rx="2" fill="currentColor" opacity=".48"/>' +
         '</svg>';
 
     var manifest = {
         type: 'other',
         version: VERSION,
-        name: 'Netflix Top 10',
-        description: 'Официальный Netflix Top 10 с нативными карточками Lampa',
+        name: 'Streaming Tops',
+        description: 'Ежедневные Top 10 Netflix, HBO Max, Prime Video, Apple TV, Disney+ и Paramount+',
         component: COMPONENT
     };
 
     function log() {
         try {
             var args = Array.prototype.slice.call(arguments);
-            args.unshift('[Netflix Top 10]');
+            args.unshift('[Streaming Tops]');
             console.log.apply(console, args);
         } catch (e) {}
     }
@@ -70,12 +101,28 @@
         return appDigital() >= 300 && Lampa.Maker && Lampa.Maker.make;
     }
 
-    function currentCountry() {
+    function getRegion() {
         var value = 'UA';
         try {
-            value = Lampa.Storage.get(COUNTRY_KEY, 'UA') || 'UA';
+            value = Lampa.Storage.get(REGION_KEY, 'UA') || 'UA';
         } catch (e) {}
-        return COUNTRIES[value] ? value : 'UA';
+
+        // Migration from the old Netflix-only plugin.
+        if (value === 'GLOBAL') value = 'WORLD';
+
+        return REGIONS[value] ? value : 'UA';
+    }
+
+    function serviceEnabled(key) {
+        var service = SERVICES[key];
+        if (!service) return false;
+
+        try {
+            var value = Lampa.Storage.get(service.setting, '1');
+            return String(value) !== '0';
+        } catch (e) {
+            return true;
+        }
     }
 
     function pluginBaseUrl() {
@@ -113,7 +160,7 @@
 
     function requestJson(url, success, error) {
         if (!url) {
-            error('Не удалось определить URL файла data/top10.json');
+            error('Не удалось определить URL data/top10.json');
             return null;
         }
 
@@ -137,13 +184,10 @@
                             }
                         },
                         function () {
-                            error('Не удалось загрузить рейтинг Netflix');
+                            error('Не удалось загрузить Streaming Tops');
                         },
                         false,
-                        {
-                            dataType: 'json',
-                            cache: { life: 10 }
-                        }
+                        { dataType: 'json', cache: { life: 5 } }
                     );
                     return network;
                 }
@@ -165,7 +209,7 @@
             return null;
         }
 
-        error('В этой сборке Lampa не найден доступный сетевой клиент');
+        error('В этой сборке Lampa нет доступного сетевого клиента');
         return null;
     }
 
@@ -193,12 +237,15 @@
     }
 
     function scoreCandidate(candidate, wanted, kind) {
+        if (!candidate) return -999;
+
+        if (candidate.media_type === 'person') return -999;
+
         var wantedNorm = normalizeTitle(wanted);
         var titles = tmdbAltTitles(candidate);
         var best = 0;
-        var i;
 
-        for (i = 0; i < titles.length; i++) {
+        for (var i = 0; i < titles.length; i++) {
             var current = normalizeTitle(titles[i]);
             if (!current) continue;
 
@@ -211,14 +258,20 @@
         if (candidate.vote_count && candidate.vote_count > 100) best += 3;
         if (candidate.popularity) best += Math.min(5, Math.log(candidate.popularity + 1));
 
-        if (kind === 'movie' && candidate.title) best += 2;
-        if (kind === 'tv' && candidate.name) best += 2;
+        var type = candidate.media_type ||
+            (candidate.name || candidate.original_name || candidate.first_air_date ? 'tv' : 'movie');
+
+        if (kind === 'movie' && type === 'movie') best += 8;
+        if (kind === 'tv' && type === 'tv') best += 8;
 
         return best;
     }
 
     function selectBestCandidate(results, wanted, kind) {
-        var list = results || [];
+        var list = (results || []).filter(function (item) {
+            return item && item.media_type !== 'person';
+        });
+
         if (!list.length) return null;
 
         var scored = list.map(function (item, index) {
@@ -250,13 +303,14 @@
     function saveCache(cache) {
         try {
             var keys = Object.keys(cache);
-            if (keys.length > 300) {
+
+            if (keys.length > 500) {
                 keys.sort(function (a, b) {
                     return (cache[b].saved_at || 0) - (cache[a].saved_at || 0);
                 });
 
                 var trimmed = {};
-                keys.slice(0, 240).forEach(function (key) {
+                keys.slice(0, 400).forEach(function (key) {
                     trimmed[key] = cache[key];
                 });
                 cache = trimmed;
@@ -278,7 +332,9 @@
             return;
         }
 
-        var path = kind === 'tv' ? 'search/tv' : 'search/movie';
+        var path = kind === 'tv'
+            ? 'search/tv'
+            : (kind === 'movie' ? 'search/movie' : 'search/multi');
 
         try {
             api.get(
@@ -300,31 +356,37 @@
         }
     }
 
-    function decorateResolvedCard(card, netflixItem) {
+    function decorateResolvedCard(card, sourceItem, kind) {
         var result = {};
-        var key;
 
-        for (key in card) {
-            if (Object.prototype.hasOwnProperty.call(card, key)) result[key] = card[key];
+        Object.keys(card || {}).forEach(function (key) {
+            result[key] = card[key];
+        });
+
+        if (!result.media_type) {
+            result.media_type = kind === 'multi'
+                ? (result.name || result.original_name || result.first_air_date ? 'tv' : 'movie')
+                : kind;
         }
 
         result.source = 'tmdb';
-        result.netflix_rank = netflixItem.rank;
-        result.netflix_title = netflixItem.title;
-        result.netflix_season_title = netflixItem.season_title || '';
-        result.netflix_weeks = netflixItem.weeks_in_top10 || netflixItem.cumulative_weeks_in_top_10 || 0;
+        result.streaming_rank = sourceItem.rank || 0;
+        result.streaming_service = sourceItem.service || '';
+        result.streaming_chart = sourceItem.chart || '';
+        result.streaming_source_title = sourceItem.title || '';
+        result.streaming_source_url = sourceItem.source_url || '';
 
         return result;
     }
 
-    function resolveOne(netflixItem, kind, callback) {
-        var title = netflixItem.search_title || netflixItem.title || '';
+    function resolveOne(sourceItem, kind, callback) {
+        var title = sourceItem.search_title || sourceItem.title || '';
         var cache = loadCache();
         var key = cacheKey(kind, title);
         var cached = cache[key];
 
-        if (cached && cached.card && (Date.now() - (cached.saved_at || 0) < CACHE_TTL)) {
-            callback(decorateResolvedCard(cached.card, netflixItem));
+        if (cached && cached.card && Date.now() - (cached.saved_at || 0) < CACHE_TTL) {
+            callback(decorateResolvedCard(cached.card, sourceItem, kind));
             return;
         }
 
@@ -334,19 +396,32 @@
             function (results) {
                 var best = selectBestCandidate(results, title, kind);
 
+                // If a strict movie/TV search failed, try multi as a safety net.
+                if (!best && kind !== 'multi') {
+                    tmdbSearch('multi', title, function (multiResults) {
+                        var multiBest = selectBestCandidate(multiResults, title, kind);
+                        if (!multiBest) {
+                            callback(null);
+                            return;
+                        }
+
+                        cache[key] = { saved_at: Date.now(), card: multiBest };
+                        saveCache(cache);
+                        callback(decorateResolvedCard(multiBest, sourceItem, kind));
+                    }, function () {
+                        callback(null);
+                    });
+                    return;
+                }
+
                 if (!best) {
                     callback(null);
                     return;
                 }
 
-                best.source = 'tmdb';
-                cache[key] = {
-                    saved_at: Date.now(),
-                    card: best
-                };
+                cache[key] = { saved_at: Date.now(), card: best };
                 saveCache(cache);
-
-                callback(decorateResolvedCard(best, netflixItem));
+                callback(decorateResolvedCard(best, sourceItem, kind));
             },
             function () {
                 callback(null);
@@ -355,7 +430,7 @@
     }
 
     function mapLimit(items, limit, iterator, done) {
-        var source = items.slice();
+        var source = (items || []).slice();
         var output = new Array(source.length);
         var nextIndex = 0;
         var active = 0;
@@ -387,111 +462,124 @@
         pump();
     }
 
-    function resolveList(items, kind, callback) {
-        mapLimit(items || [], 4, function (item, next) {
+    function resolveList(items, kind, serviceKey, chartKey, callback) {
+        mapLimit(items || [], 4, function (raw, next) {
+            var item = {};
+            Object.keys(raw || {}).forEach(function (key) { item[key] = raw[key]; });
+            item.service = serviceKey;
+            item.chart = chartKey;
+
             resolveOne(item, kind, next);
         }, function (resolved) {
             callback(resolved.filter(Boolean));
         });
     }
 
-    function weekLabel(week) {
-        if (!week) return '';
-        var parts = String(week).split('-');
-        if (parts.length !== 3) return String(week);
+    function dateLabel(value) {
+        if (!value) return '';
+        var parts = String(value).split('-');
+        if (parts.length !== 3) return value;
         return parts[2] + '.' + parts[1] + '.' + parts[0];
     }
 
-    function buildCountryRows(data, code, callback) {
-        var bucket = data.countries && data.countries[code];
-        if (!bucket) {
-            callback([], '');
+    function chartLabel(key) {
+        if (key === 'movies') return 'Фильмы';
+        if (key === 'tv') return 'Сериалы';
+        return 'Общий Top 10';
+    }
+
+    function chartKind(key) {
+        if (key === 'movies') return 'movie';
+        if (key === 'tv') return 'tv';
+        return 'multi';
+    }
+
+    function buildRows(data, callback) {
+        var regionKey = getRegion();
+        var region = data.regions && data.regions[regionKey];
+
+        if (!region && data.regions) region = data.regions.UA;
+        if (!region) {
+            callback([]);
             return;
         }
 
-        var movies = bucket.movies || [];
-        var tv = bucket.tv || [];
-        var doneCount = 0;
-        var movieCards = [];
-        var tvCards = [];
+        var defs = [];
 
-        function finish() {
-            doneCount++;
-            if (doneCount < 2) return;
+        SERVICE_ORDER.forEach(function (serviceKey) {
+            if (!serviceEnabled(serviceKey)) return;
 
-            var countryName = COUNTRIES[code] || bucket.name || code;
-            var week = bucket.week || data.latest_country_week || '';
-            var suffix = countryName + (week ? ' · ' + weekLabel(week) : '');
+            var serviceData = region.services && region.services[serviceKey];
+            if (!serviceData || !serviceData.charts) return;
 
-            callback([
-                {
-                    title: '🔥 Netflix Top 10 — Фильмы · ' + suffix,
-                    results: movieCards
-                },
-                {
-                    title: '📺 Netflix Top 10 — Сериалы · ' + suffix,
-                    results: tvCards
-                }
-            ], week);
+            var meta = SERVICES[serviceKey] || { name: serviceKey, prefix: '▶' };
+            var scopeText = regionKey === 'WORLD' ? 'Мир' : 'Украина';
+
+            if (serviceData.scope === 'world_fallback') {
+                scopeText = 'Мир · локального чарта для Украины нет';
+            }
+
+            var stale = serviceData.stale ? ' · данные предыдущего обновления' : '';
+            var date = serviceData.date ? ' · ' + dateLabel(serviceData.date) : '';
+
+            ['movies', 'tv', 'overall'].forEach(function (chartKey) {
+                var list = serviceData.charts[chartKey] || [];
+                if (!list.length) return;
+
+                defs.push({
+                    serviceKey: serviceKey,
+                    chartKey: chartKey,
+                    kind: chartKind(chartKey),
+                    items: list,
+                    title:
+                        meta.prefix + ' ' + meta.name +
+                        ' · ' + chartLabel(chartKey) +
+                        ' · ' + scopeText + date + stale
+                });
+            });
+        });
+
+        if (!defs.length) {
+            callback([]);
+            return;
         }
-
-        resolveList(movies, 'movie', function (cards) {
-            movieCards = cards;
-            finish();
-        });
-
-        resolveList(tv, 'tv', function (cards) {
-            tvCards = cards;
-            finish();
-        });
-    }
-
-    function buildGlobalRows(data, callback) {
-        var global = data.global || {};
-        var groups = global.groups || {};
-        var defs = [
-            { key: 'films_english', title: '🎬 Netflix Global — Films (English)', kind: 'movie' },
-            { key: 'films_non_english', title: '🌍 Netflix Global — Films (Non-English)', kind: 'movie' },
-            { key: 'tv_english', title: '📺 Netflix Global — TV (English)', kind: 'tv' },
-            { key: 'tv_non_english', title: '🌐 Netflix Global — TV (Non-English)', kind: 'tv' }
-        ];
 
         var rows = new Array(defs.length);
         var count = 0;
 
         defs.forEach(function (def, index) {
-            resolveList(groups[def.key] || [], def.kind, function (cards) {
-                var week = global.week || data.latest_global_week || '';
-                rows[index] = {
-                    title: def.title + (week ? ' · ' + weekLabel(week) : ''),
-                    results: cards
-                };
-                count++;
-                if (count === defs.length) callback(rows, week);
-            });
+            resolveList(
+                def.items,
+                def.kind,
+                def.serviceKey,
+                def.chartKey,
+                function (cards) {
+                    rows[index] = {
+                        title: def.title,
+                        results: cards
+                    };
+
+                    count++;
+                    if (count === defs.length) callback(rows.filter(Boolean));
+                }
+            );
         });
     }
 
     function loadRows(success, error) {
         requestJson(dataUrl(), function (data) {
-            if (!data || !data.generated) {
-                error('Файл top10.json ещё не был обновлён GitHub Action');
+            if (!data || !data.generated || Number(data.schema || 0) < 4) {
+                error('Данные Streaming Tops ещё не обновлены. Запусти GitHub Action Update Streaming Tops.');
                 return;
             }
 
-            var country = currentCountry();
-
-            if (country === 'GLOBAL') {
-                buildGlobalRows(data, success);
-            } else {
-                buildCountryRows(data, country, function (rows, week) {
-                    if (!rows.length) {
-                        error('Для выбранной страны нет данных Netflix');
-                        return;
-                    }
-                    success(rows, week);
-                });
-            }
+            buildRows(data, function (rows) {
+                if (!rows.length) {
+                    error('В текущем регионе нет доступных рейтингов.');
+                    return;
+                }
+                success(rows);
+            });
         }, error);
     }
 
@@ -507,7 +595,7 @@
 
     function openFull(card) {
         if (!card || !card.id) {
-            openSearch(card && (card.netflix_title || tmdbTitle(card)) || '');
+            openSearch(card && (card.streaming_source_title || tmdbTitle(card)) || '');
             return;
         }
 
@@ -518,7 +606,8 @@
             }
         } catch (e) {}
 
-        var kind = card.name || card.original_name || card.first_air_date ? 'tv' : 'movie';
+        var kind = card.media_type ||
+            (card.name || card.original_name || card.first_air_date ? 'tv' : 'movie');
 
         try {
             Lampa.Activity.push({
@@ -533,12 +622,12 @@
                 page: 1
             });
         } catch (e2) {
-            openSearch(card.netflix_title || tmdbTitle(card));
+            openSearch(card.streaming_source_title || tmdbTitle(card));
         }
     }
 
     function applyRankBadge(cardInstance, data) {
-        if (!data || !data.netflix_rank || !cardInstance) return;
+        if (!data || !data.streaming_rank || !cardInstance) return;
 
         function decorate() {
             try {
@@ -548,12 +637,12 @@
                 var node = render.jquery ? render : $(render);
                 if (!node || !node.length) return;
 
-                node.addClass('netflix-top10-card');
+                node.addClass('streaming-tops-card');
 
-                if (!node.find('.netflix-top10-rank').length) {
+                if (!node.find('.streaming-tops-rank').length) {
                     node.append(
-                        '<div class="netflix-top10-rank">#' +
-                        String(data.netflix_rank) +
+                        '<div class="streaming-tops-rank">#' +
+                        String(data.streaming_rank) +
                         '</div>'
                     );
                 }
@@ -618,7 +707,12 @@
                             },
                             onFocus: function () {
                                 try {
-                                    if (Lampa.Background && Lampa.Background.change && Lampa.Utils && Lampa.Utils.cardImgBackground) {
+                                    if (
+                                        Lampa.Background &&
+                                        Lampa.Background.change &&
+                                        Lampa.Utils &&
+                                        Lampa.Utils.cardImgBackground
+                                    ) {
                                         Lampa.Background.change(Lampa.Utils.cardImgBackground(data));
                                     }
                                 } catch (e) {}
@@ -674,10 +768,12 @@
 
     function component(object) {
         if (isV3()) return createV3Component(object);
-
         if (Lampa.InteractionMain) return createLegacyComponent(object);
 
-        Lampa.Noty.show('Netflix Top 10: эта версия Lampa слишком старая');
+        if (Lampa.Noty && Lampa.Noty.show) {
+            Lampa.Noty.show('Streaming Tops: эта версия Lampa слишком старая');
+        }
+
         return {
             create: function () { return $('<div></div>'); },
             render: function () { return $('<div></div>'); },
@@ -689,13 +785,13 @@
     }
 
     function addStyles() {
-        if (document.getElementById('netflix-top10-native-style')) return;
+        if (document.getElementById('streaming-tops-style')) return;
 
         var style = document.createElement('style');
-        style.id = 'netflix-top10-native-style';
+        style.id = 'streaming-tops-style';
         style.innerHTML =
-            '.netflix-top10-card{position:relative!important}' +
-            '.netflix-top10-rank{' +
+            '.streaming-tops-card{position:relative!important}' +
+            '.streaming-tops-rank{' +
                 'position:absolute!important;' +
                 'left:.35em!important;' +
                 'top:.35em!important;' +
@@ -712,8 +808,8 @@
                 'font-weight:800!important;' +
                 'line-height:1!important;' +
                 'color:#fff!important;' +
-                'background:rgba(229,9,20,.96)!important;' +
-                'box-shadow:0 .12em .45em rgba(0,0,0,.5)!important;' +
+                'background:rgba(20,20,20,.90)!important;' +
+                'box-shadow:0 .12em .45em rgba(0,0,0,.55)!important;' +
                 'pointer-events:none!important;' +
             '}';
         document.head.appendChild(style);
@@ -727,49 +823,76 @@
         }
     }
 
+    function addSelectSetting(component, name, values, defaultValue, title, description, onChange) {
+        Lampa.SettingsApi.addParam({
+            component: component,
+            param: {
+                name: name,
+                type: 'select',
+                values: values,
+                default: defaultValue
+            },
+            field: {
+                name: title,
+                description: description
+            },
+            onChange: onChange || function (value) {
+                try { Lampa.Storage.set(name, value); } catch (e) {}
+            }
+        });
+    }
+
     function addSettings() {
         if (!Lampa.SettingsApi || !Lampa.SettingsApi.addComponent || !Lampa.SettingsApi.addParam) return;
 
         try {
             Lampa.SettingsApi.addComponent({
                 component: SETTINGS_COMPONENT,
-                name: 'Netflix Top 10',
+                name: 'Streaming Tops',
                 icon: ICON
             });
 
-            Lampa.SettingsApi.addParam({
-                component: SETTINGS_COMPONENT,
-                param: {
-                    name: COUNTRY_KEY,
-                    type: 'select',
-                    values: COUNTRIES,
-                    default: 'UA'
-                },
-                field: {
-                    name: 'Регион рейтинга',
-                    description: 'Какой Netflix Top 10 показывать во вкладке Netflix'
-                },
-                onChange: function (value) {
-                    try {
-                        Lampa.Storage.set(COUNTRY_KEY, value || 'UA');
-                    } catch (e) {}
+            addSelectSetting(
+                SETTINGS_COMPONENT,
+                REGION_KEY,
+                REGIONS,
+                'UA',
+                'Регион',
+                'Украина — локальные ежедневные чарты; Мир — мировые чарты.',
+                function (value) {
+                    try { Lampa.Storage.set(REGION_KEY, value || 'UA'); } catch (e) {}
                 }
+            );
+
+            SERVICE_ORDER.forEach(function (key) {
+                var service = SERVICES[key];
+
+                addSelectSetting(
+                    SETTINGS_COMPONENT,
+                    service.setting,
+                    { '1': 'Показывать', '0': 'Скрыть' },
+                    '1',
+                    service.name,
+                    'Показывать или скрывать ряды ' + service.name + '.'
+                );
             });
 
             Lampa.SettingsApi.addParam({
                 component: SETTINGS_COMPONENT,
                 param: {
-                    name: 'netflix_top10_clear_cache',
+                    name: 'streaming_tops_clear_cache',
                     type: 'button'
                 },
                 field: {
                     name: 'Очистить кэш постеров',
-                    description: 'Повторно найти все позиции Netflix в TMDB'
+                    description: 'Повторно сопоставить названия из рейтингов с TMDB.'
                 },
                 onChange: function () {
                     try {
                         Lampa.Storage.set(CACHE_KEY, {});
-                        if (Lampa.Noty && Lampa.Noty.show) Lampa.Noty.show('Кэш Netflix Top 10 очищен');
+                        if (Lampa.Noty && Lampa.Noty.show) {
+                            Lampa.Noty.show('Кэш Streaming Tops очищен');
+                        }
                     } catch (e) {}
                 }
             });
@@ -778,10 +901,10 @@
         }
     }
 
-    function openNetflixSection() {
+    function openStreamingSection() {
         Lampa.Activity.push({
             url: '',
-            title: 'Netflix Top 10',
+            title: 'Streaming Tops',
             component: COMPONENT,
             page: 1
         });
@@ -790,7 +913,7 @@
     function menuButtonExists() {
         try {
             return !!document.querySelector(
-                '.netflix-top10-menu, .menu__item[data-action="netflix_top10"]'
+                '.streaming-tops-menu, .menu__item[data-action="streaming_tops"]'
             );
         } catch (e) {
             return false;
@@ -805,19 +928,16 @@
             if (!list || !list.length) return false;
 
             var button = $(
-                '<li class="menu__item selector netflix-top10-menu" data-action="netflix_top10">' +
+                '<li class="menu__item selector streaming-tops-menu" data-action="streaming_tops">' +
                     '<div class="menu__ico">' + ICON + '</div>' +
-                    '<div class="menu__text">Netflix</div>' +
+                    '<div class="menu__text">Streaming Tops</div>' +
                 '</li>'
             );
 
-            button.on('hover:enter click', function () {
-                openNetflixSection();
-            });
-
+            button.on('hover:enter click', openStreamingSection);
             list.append(button);
 
-            log('Menu button added by legacy DOM fallback');
+            log('Menu button added by DOM fallback');
             return true;
         } catch (e) {
             log('Legacy menu fallback error', e);
@@ -828,56 +948,35 @@
     function addMenu() {
         if (menuButtonExists()) return;
 
-        /*
-         * Lampa 3.x official API.
-         * Some builds expose SettingsApi but either do not expose Menu.addButton
-         * or rebuild the menu after plugins load. Therefore we verify that the
-         * button actually reached the DOM and fall back to the classic menu DOM.
-         */
         if (
-            !window.netflix_top10_menu_api_attempted &&
+            !window.streaming_tops_menu_api_attempted &&
             Lampa.Menu &&
             typeof Lampa.Menu.addButton === 'function'
         ) {
-            window.netflix_top10_menu_api_attempted = true;
+            window.streaming_tops_menu_api_attempted = true;
 
             try {
-                var button = Lampa.Menu.addButton(
-                    ICON,
-                    'Netflix',
-                    openNetflixSection
-                );
+                var button = Lampa.Menu.addButton(ICON, 'Streaming Tops', openStreamingSection);
 
-                if (button && button.addClass) {
-                    button.addClass('netflix-top10-menu');
-                }
-
-                if (button && button.attr) {
-                    button.attr('data-action', 'netflix_top10');
-                }
-
-                log('Menu.addButton called');
+                if (button && button.addClass) button.addClass('streaming-tops-menu');
+                if (button && button.attr) button.attr('data-action', 'streaming_tops');
             } catch (e) {
                 log('Menu.addButton error', e);
             }
         }
 
-        /*
-         * Check on the next tick because some Lampa builds append the element
-         * asynchronously. If it is still absent, use the old reliable markup.
-         */
         setTimeout(function () {
             if (!menuButtonExists()) addLegacyMenuButton();
         }, 80);
     }
 
     function startPlugin() {
-        if (window.netflix_top10_native_started) return;
-        window.netflix_top10_native_started = true;
+        if (window.streaming_tops_v2_started) return;
+        window.streaming_tops_v2_started = true;
 
         try {
-            if (!Lampa.Storage.get(COUNTRY_KEY, '')) {
-                Lampa.Storage.set(COUNTRY_KEY, 'UA');
+            if (!Lampa.Storage.get(REGION_KEY, '')) {
+                Lampa.Storage.set(REGION_KEY, 'UA');
             }
         } catch (e) {}
 
@@ -887,8 +986,6 @@
         addSettings();
         addMenu();
 
-        // Some TV builds rebuild the left menu after plugin initialization.
-        // Retry safely; duplicate protection is built into addMenu().
         setTimeout(addMenu, 700);
         setTimeout(addMenu, 1800);
         setTimeout(addMenu, 4000);
