@@ -1,4 +1,4 @@
-name: Update Netflix Top 10
+name: Update Streaming Tops
 
 on:
   workflow_dispatch:
@@ -9,14 +9,21 @@ on:
       - "scripts/update_netflix.py"
       - ".github/workflows/update-netflix.yml"
   schedule:
-    - cron: "31 12 * * *"
+    # FlixPatrol's same-day Netflix charts are commonly published later
+    # than the general charts. 16:30 UTC is intentionally after that window.
+    - cron: "30 16 * * *"
 
 permissions:
   contents: write
 
+concurrency:
+  group: streaming-tops-update
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -27,10 +34,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Build current Netflix Top 10 JSON
+      - name: Fetch daily streaming charts
         run: python scripts/update_netflix.py
 
-      - name: Commit only when rankings changed
+      - name: Commit rankings when changed
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
@@ -39,9 +46,9 @@ jobs:
           git add data/top10.json
 
           if git diff --cached --quiet; then
-            echo "No Netflix Top 10 changes."
+            echo "Streaming Tops have not changed."
             exit 0
           fi
 
-          git commit -m "Update Netflix Top 10"
+          git commit -m "Update Streaming Tops"
           git push
