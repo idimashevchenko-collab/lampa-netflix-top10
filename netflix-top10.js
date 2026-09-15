@@ -1,7 +1,7 @@
 /*!
  * Streaming Tops for Lampa
  * File name intentionally remains netflix-top10.js so existing install URLs do not change.
- * Version: 2.4.0
+ * Version: 2.4.1
  *
  * Daily rankings: FlixPatrol public TOP 10 pages, read by the free Jina Reader proxy.
  * Posters/metadata: Lampa built-in TMDB source (no extra TMDB key).
@@ -12,7 +12,7 @@
     if (window.streaming_tops_v2_ready) return;
     window.streaming_tops_v2_ready = true;
 
-    var VERSION = '2.4.0';
+    var VERSION = '2.4.1';
     var COMPONENT = 'streaming_tops';
     var SETTINGS_COMPONENT = 'streaming_tops_settings';
     var REGION_KEY = 'streaming_tops_region';
@@ -706,7 +706,14 @@
                         style: { name: 'wide' }
                     }
                 };
-            })
+            }),
+            params: {
+                items: {
+                    mapping: 'line',
+                    align_left: true,
+                    view: 20
+                }
+            }
         };
     }
 
@@ -943,6 +950,16 @@
             return list;
         }
 
+        var dedicated =
+            serviceData &&
+            serviceData.genre_catalogs &&
+            serviceData.genre_catalogs[filter] &&
+            serviceData.genre_catalogs[filter][type];
+
+        if (dedicated && dedicated.length) {
+            return dedicated.slice();
+        }
+
         return list.filter(function (item) {
             return itemHasGenre(item, filter);
         });
@@ -1009,7 +1026,14 @@
                         style: { name: 'wide' }
                     }
                 };
-            })
+            }),
+            params: {
+                items: {
+                    mapping: 'line',
+                    align_left: true,
+                    view: 24
+                }
+            }
         };
     }
 

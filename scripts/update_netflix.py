@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Streaming Tops updater v2.4.0
+Streaming Tops updater v2.4.1
 
 Stable free sources:
 1) Netflix official weekly country charts:
@@ -177,7 +177,7 @@ def graphql(
         data=payload,
         headers={
             "Content-Type": "application/json",
-            "User-Agent": "streaming-tops-lampa/2.4.0",
+            "User-Agent": "streaming-tops-lampa/2.4.1",
             "Accept": "application/json",
         },
         method="POST",
@@ -459,6 +459,36 @@ def build_justwatch_region(region_key: str) -> dict[str, Any]:
             count=10,
         )
 
+        # Documentary is a relatively small genre, so filtering only the
+        # provider's top ~70 general titles can leave just a handful of items.
+        # Fetch it directly from JustWatch and keep a large dedicated catalog.
+        documentary_movies = []
+        documentary_tv = []
+
+        try:
+            documentary_movies = get_popular(
+                country,
+                package_id,
+                ["MOVIE"],
+                "POPULAR",
+                count=100,
+                genres=["doc"],
+            )
+        except Exception as exc:
+            print(f"  documentary movies fallback to broad catalog: {exc}")
+
+        try:
+            documentary_tv = get_popular(
+                country,
+                package_id,
+                ["SHOW"],
+                "POPULAR",
+                count=100,
+                genres=["doc"],
+            )
+        except Exception as exc:
+            print(f"  documentary TV fallback to broad catalog: {exc}")
+
         if not (movies_catalog or tv_catalog or hot):
             continue
 
@@ -477,6 +507,12 @@ def build_justwatch_region(region_key: str) -> dict[str, Any]:
             "catalogs": {
                 "movies": browse_copy(movies_catalog, 70),
                 "tv": browse_copy(tv_catalog, 70),
+            },
+            "genre_catalogs": {
+                "doc": {
+                    "movies": browse_copy(documentary_movies, 100),
+                    "tv": browse_copy(documentary_tv, 100),
+                }
             },
         }
 
@@ -634,7 +670,7 @@ def main() -> None:
     payload = {
         "schema": 4,
         "generated": True,
-        "version": "2.4.0",
+        "version": "2.4.1",
         "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "source": "Netflix Tudum + JustWatch public GraphQL + JustWatch streamingCharts",
         "source_note": (
