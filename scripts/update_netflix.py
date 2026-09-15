@@ -33,7 +33,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "data" / "top10.json"
 
-JINA_PREFIX = "https://r.jina.ai/http://flixpatrol.com/top10"
+JINA_PREFIX = "https://r.jina.ai/https://flixpatrol.com/top10"
 
 SERVICES: dict[str, dict[str, Any]] = {
     "netflix": {
@@ -104,6 +104,18 @@ DAYS_RE = re.compile(r"^\d+\s*(?:d|day|days)$", re.IGNORECASE)
 POINTS_RE = re.compile(r"^[\d,\s]+$")
 
 
+# Real Jina Reader output from FlixPatrol is commonly compact, for example:
+# 1.–[Maternal Instinct](https://flixpatrol.com/title/maternal-instinct/)7 d
+# It may contain no pipes and no whitespace after "1.".
+COMPACT_RANK_RE = re.compile(
+    r"^(\d{1,2})\.([^[]*)"
+    r"\[([^\]]+)\]"
+    r"\(https://flixpatrol\.com/title/([^/)]+)/?\)"
+    r"(?:\s*(\d+)\s*d)?",
+    re.IGNORECASE,
+)
+
+
 def load_previous() -> dict[str, Any]:
     try:
         data = json.loads(OUT.read_text(encoding="utf-8"))
@@ -128,7 +140,7 @@ def source_url(service_slug: str, region: str) -> str:
 
 def fetch_reader(url: str, attempts: int = 3) -> str:
     headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; StreamingTopsLampa/2.0)",
+        "User-Agent": "Mozilla/5.0 (compatible; StreamingTopsLampa/2.0.1)",
         "Accept": "text/plain,text/markdown,*/*",
         "X-Return-Format": "markdown",
     }
@@ -141,8 +153,18 @@ def fetch_reader(url: str, attempts: int = 3) -> str:
             with urllib.request.urlopen(request, timeout=90) as response:
                 raw = response.read()
             text = raw.decode("utf-8", errors="replace")
+
             if len(text.strip()) < 100:
                 raise RuntimeError("Reader returned an unexpectedly short response")
+
+            # r.jina.ai may return HTTP 200 for a FlixPatrol error page,
+            # so validate the page content too.
+            if "Page Not Found" in text:
+                raise RuntimeError("FlixPatrol page not found")
+
+            if not re.search(r"TOP 10 on .+ in .+", text, re.IGNORECASE):
+                raise RuntimeError("Reader response is not a valid FlixPatrol Top 10 page")
+
             return text
         except Exception as exc:
             last_error = exc
@@ -239,8 +261,28 @@ def extract_title_from_row(line: str) -> str:
 def extract_rows(lines: list[str]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
 
-    for line in lines:
-        rank_match = RANK_RE.match(line)
+    for raw_line in lines:
+        line = raw_line.strip()
+
+        # Primary parser: actual compact r.jina.ai Markdown.
+        compact = COMPACT_RANK_RE.match(line)
+        if compact:
+            rank = int(compact.group(1))
+            if 1 <= rank <= 10:
+                title = clean_markdown(compact.group(3))
+                if title:
+                    items.append(
+                        {
+                            "rank": rank,
+                            "title": title,
+                            "search_title": title,
+                        }
+                    )
+            continue
+
+        # Fallback: pretty/table Markdown such as:
+        # 1. | – | Movie Title | 7 d
+        rank_match = re.match(r"^\s*\|?\s*(\d{1,2})\.", line)
         if not rank_match:
             continue
 
@@ -252,7 +294,6 @@ def extract_rows(lines: list[str]) -> list[dict[str, Any]]:
         if not title:
             continue
 
-        # Preserve source order and duplicates exactly. Do not dedupe.
         items.append(
             {
                 "rank": rank,
@@ -261,11 +302,11 @@ def extract_rows(lines: list[str]) -> list[dict[str, Any]]:
             }
         )
 
-    # Some Reader layouts may accidentally duplicate the same row while
-    # keeping identical rank+title. Remove only exact rendering duplicates,
-    # NOT different ranks of the same title.
+    # Preserve same title at DIFFERENT ranks exactly as the source provides it.
+    # Remove only an exact duplicate rank+title caused by renderer duplication.
     seen: set[tuple[int, str]] = set()
     clean: list[dict[str, Any]] = []
+
     for item in items:
         signature = (item["rank"], item["title"])
         if signature in seen:
@@ -378,7 +419,19 @@ def fetch_service(service_key: str, region_key: str) -> dict[str, Any]:
     }
 
     if not has_any_chart(result):
-        raise RuntimeError(f"No Top 10 rows parsed for {service_key} / {region_key}")
+        debug_lines = []
+        for line in markdown.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("### ") or re.match(r"^\d{1,2}\.", stripped):
+                debug_lines.append(stripped[:220])
+            if len(debug_lines) >= 12:
+                break
+
+        debug = " | ".join(debug_lines) if debug_lines else "(no rank-like lines found)"
+        raise RuntimeError(
+            f"No Top 10 rows parsed for {service_key} / {region_key}. "
+            f"Reader sample: {debug}"
+        )
 
     return result
 
@@ -486,7 +539,7 @@ def build() -> dict[str, Any]:
     payload = {
         "schema": 4,
         "generated": True,
-        "version": "2.0.0",
+        "version": "2.0.1",
         "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "source": "FlixPatrol public TOP 10 via Jina AI Reader",
         "source_note": (
