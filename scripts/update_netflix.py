@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Streaming Tops updater v2.1.1
+Streaming Tops updater v2.3.0
 
 Stable free sources:
 1) Netflix official weekly country charts:
@@ -100,11 +100,63 @@ fragment TitleDetails on MovieOrShowOrSeasonOrEpisode {
   content(country: $country, language: $language) {
     title
     originalReleaseYear
+    genres {
+      shortName
+      translation(language: $language)
+    }
   }
 }
 """
 
 
+
+STREAMING_CHARTS_QUERY = r"""
+query GetStreamingChartInfo(
+  $countryStreamingCharts: Country,
+  $country: Country!,
+  $language: Language!,
+  $filter: StreamingChartsFilter,
+  $first: Int!
+) {
+  streamingCharts(
+    country: $countryStreamingCharts
+    filter: $filter
+    first: $first
+  ) {
+    edges {
+      streamingChartInfo {
+        rank
+        trend
+        trendDifference
+        daysInTop10
+        topRank
+      }
+      node {
+        id
+        objectType
+        ... on Movie {
+          content(country: $country, language: $language) {
+            title
+            originalReleaseYear
+          }
+        }
+        ... on Show {
+          content(country: $country, language: $language) {
+            title
+            originalReleaseYear
+          }
+        }
+        ... on Season {
+          content(country: $country, language: $language) {
+            title
+            originalReleaseYear
+          }
+        }
+      }
+    }
+  }
+}
+"""
 def graphql(
     operation_name: str,
     query: str,
@@ -123,7 +175,7 @@ def graphql(
         data=payload,
         headers={
             "Content-Type": "application/json",
-            "User-Agent": "streaming-tops-lampa/2.1.1",
+            "User-Agent": "streaming-tops-lampa/2.3.0",
             "Accept": "application/json",
         },
         method="POST",
@@ -206,20 +258,28 @@ def find_packages(country: str) -> dict[str, str]:
 
 def get_popular(
     country: str,
-    package_id: str,
+    package_id: str | None,
     object_types: list[str],
     sort_by: str,
     count: int = 10,
+    genres: list[str] | None = None,
 ) -> list[dict[str, Any]]:
+    title_filter: dict[str, Any] = {
+        "includeTitlesWithoutUrl": True,
+        "objectTypes": object_types,
+        "releaseYear": {},
+    }
+
+    if package_id:
+        title_filter["packages"] = [package_id]
+
+    if genres:
+        title_filter["genres"] = genres
+
     variables = {
         "country": country,
         "language": "en",
-        "popularTitlesFilter": {
-            "packages": [package_id],
-            "includeTitlesWithoutUrl": True,
-            "objectTypes": object_types,
-            "releaseYear": {},
-        },
+        "popularTitlesFilter": title_filter,
         "first": count,
         "sortBy": sort_by,
         "offset": 0,
@@ -236,15 +296,187 @@ def get_popular(
         if not title:
             continue
 
+        genre_names: list[str] = []
+        for genre in content.get("genres") or []:
+            name = (
+                (genre or {}).get("translation")
+                or (genre or {}).get("shortName")
+                or ""
+            )
+            if name and name not in genre_names:
+                genre_names.append(str(name))
+
         rows.append({
             "rank": len(rows) + 1,
             "title": title,
             "search_title": title,
             "year": content.get("originalReleaseYear"),
             "justwatch_id": node.get("id"),
+            "genres": genre_names,
         })
 
     return rows
+
+
+def is_documentary(item: dict[str, Any]) -> bool:
+    genres = " ".join(str(x) for x in (item.get("genres") or [])).lower()
+    return "documentary" in genres or "documental" in genres
+
+
+DOC_CATEGORY_RULES = {
+    "crime": ("crime",),
+    "history": ("history",),
+    "music": ("music",),
+    "sport": ("sport", "sports"),
+    "war": ("war",),
+}
+
+
+def browse_copy(items: list[dict[str, Any]], limit: int = 50) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for raw in items[:limit]:
+        item = dict(raw)
+        item["source_rank"] = item.get("rank", 0)
+        item["rank"] = 0
+        item["browse"] = True
+        result.append(item)
+    return result
+
+
+def documentary_catalog(
+    country: str,
+    package_id: str,
+    movies_catalog: list[dict[str, Any]],
+    tv_catalog: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """
+    Prefer JustWatch's historical/current documentary genre code `doc`.
+    If that filter ever stops working, fall back to documentary titles found
+    in the provider's larger popularity sample.
+    """
+    direct_movies: list[dict[str, Any]] = []
+    direct_tv: list[dict[str, Any]] = []
+
+    try:
+        direct_movies = get_popular(
+            country, package_id, ["MOVIE"], "POPULAR", count=60, genres=["doc"]
+        )
+        direct_movies = [x for x in direct_movies if is_documentary(x)]
+    except Exception as exc:
+        print(f"  documentary movie genre filter fallback: {exc}")
+
+    try:
+        direct_tv = get_popular(
+            country, package_id, ["SHOW"], "POPULAR", count=60, genres=["doc"]
+        )
+        direct_tv = [x for x in direct_tv if is_documentary(x)]
+    except Exception as exc:
+        print(f"  documentary TV genre filter fallback: {exc}")
+
+    if len(direct_movies) < 5:
+        direct_movies = [x for x in movies_catalog if is_documentary(x)]
+
+    if len(direct_tv) < 5:
+        direct_tv = [x for x in tv_catalog if is_documentary(x)]
+
+    movies = browse_copy(direct_movies, 50)
+    tv = browse_copy(direct_tv, 50)
+
+    combined = movies + tv
+    categories: dict[str, list[dict[str, Any]]] = {}
+
+    for key, words in DOC_CATEGORY_RULES.items():
+        matches = []
+        for item in combined:
+            genre_text = " ".join(str(x) for x in (item.get("genres") or [])).lower()
+            if any(word in genre_text for word in words):
+                matches.append(item)
+        if matches:
+            categories[key] = matches[:40]
+
+    return {
+        "movies": movies,
+        "tv": tv,
+        "categories": categories,
+    }
+
+
+def get_justwatch_weekly_chart(object_type: str) -> list[dict[str, Any]]:
+    filter_value = {
+        "category": "WEEKLY_POPULARITY_SAME_CONTENT_TYPE",
+        "objectType": object_type,
+    }
+
+    # The chart endpoint exposes Global as null. If that changes, fall back
+    # to the supported US chart instead of failing the whole updater.
+    last_error = None
+    for chart_country in (None, "US"):
+        try:
+            variables = {
+                "countryStreamingCharts": chart_country,
+                "country": "US",
+                "language": "en",
+                "filter": filter_value,
+                "first": 10,
+            }
+            data = graphql(
+                "GetStreamingChartInfo",
+                STREAMING_CHARTS_QUERY,
+                variables,
+            )
+            edges = ((data.get("streamingCharts") or {}).get("edges") or [])
+
+            rows: list[dict[str, Any]] = []
+            for edge in edges[:10]:
+                info = (edge or {}).get("streamingChartInfo") or {}
+                node = (edge or {}).get("node") or {}
+                content = node.get("content") or {}
+                title = content.get("title")
+                if not title:
+                    continue
+
+                rows.append({
+                    "rank": info.get("rank") or (len(rows) + 1),
+                    "title": title,
+                    "search_title": title,
+                    "year": content.get("originalReleaseYear"),
+                    "justwatch_id": node.get("id"),
+                    "trend": info.get("trend"),
+                    "trend_difference": info.get("trendDifference"),
+                })
+
+            if rows:
+                return rows
+        except Exception as exc:
+            last_error = exc
+
+    raise RuntimeError(f"JustWatch weekly chart unavailable: {last_error}")
+
+
+def build_justwatch_weekly_service() -> dict[str, Any] | None:
+    try:
+        movies = get_justwatch_weekly_chart("MOVIE")
+        tv = get_justwatch_weekly_chart("SHOW")
+
+        if not (movies or tv):
+            return None
+
+        return {
+            "name": "JustWatch",
+            "date": datetime.now(timezone.utc).date().isoformat(),
+            "scope": "global",
+            "source_label": "Global Top 10 недели",
+            "source_url": "https://www.justwatch.com/",
+            "stale": False,
+            "charts": {
+                "movies": movies,
+                "tv": tv,
+                "overall": [],
+            },
+        }
+    except Exception as exc:
+        print("WARNING JustWatch weekly charts:", exc)
+        return None
 
 
 def build_justwatch_region(region_key: str) -> dict[str, Any]:
@@ -259,11 +491,29 @@ def build_justwatch_region(region_key: str) -> dict[str, Any]:
     for service_key, package_id in packages.items():
         print(f"[JustWatch {country}] {service_key} ({package_id})")
 
-        movies = get_popular(country, package_id, ["MOVIE"], "POPULAR")
-        tv = get_popular(country, package_id, ["SHOW"], "POPULAR")
-        hot = get_popular(country, package_id, ["MOVIE", "SHOW"], "TRENDING")
+        # Fetch a broader sample once. Top rows use the first 10; the same
+        # sample also gives us genre metadata for documentary browsing.
+        movies_catalog = get_popular(
+            country, package_id, ["MOVIE"], "POPULAR", count=70
+        )
+        tv_catalog = get_popular(
+            country, package_id, ["SHOW"], "POPULAR", count=70
+        )
+        hot = get_popular(
+            country, package_id, ["MOVIE", "SHOW"], "TRENDING", count=10
+        )
 
-        if not (movies or tv or hot):
+        movies = movies_catalog[:10]
+        tv = tv_catalog[:10]
+
+        docs = documentary_catalog(
+            country,
+            package_id,
+            movies_catalog,
+            tv_catalog,
+        )
+
+        if not (movies or tv or hot or docs["movies"] or docs["tv"]):
             continue
 
         services[service_key] = {
@@ -278,6 +528,7 @@ def build_justwatch_region(region_key: str) -> dict[str, Any]:
                 "tv": tv,
                 "overall": hot,
             },
+            "documentaries": docs,
         }
 
     return {
@@ -409,6 +660,16 @@ def main() -> None:
 
         regions[region_key] = region
 
+    # JustWatch's own weekly homepage-style charts.
+    justwatch_weekly = build_justwatch_weekly_service()
+    if justwatch_weekly:
+        regions["UA"]["services"]["justwatch_weekly"] = json.loads(
+            json.dumps(justwatch_weekly)
+        )
+        regions["WORLD"]["services"]["justwatch_weekly"] = json.loads(
+            json.dumps(justwatch_weekly)
+        )
+
     # If services unavailable in UA but available in US, explicitly fallback.
     ua_services = regions["UA"]["services"]
     us_services = regions["WORLD"]["services"]
@@ -424,13 +685,14 @@ def main() -> None:
     payload = {
         "schema": 4,
         "generated": True,
-        "version": "2.1.1",
+        "version": "2.3.0",
         "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "source": "Netflix Tudum + JustWatch public GraphQL",
+        "source": "Netflix Tudum + JustWatch public GraphQL + JustWatch streamingCharts",
         "source_note": (
             "Netflix official rows are weekly country charts. "
-            "JustWatch rows represent current provider popularity/trending "
-            "and are not claimed to be proprietary in-app daily rankings."
+            "JustWatch provider rows represent current popularity/trending. "
+            "The JustWatch tab uses the weekly streamingCharts ranking. "
+            "Documentary catalogs are provider-filtered JustWatch results."
         ),
         "regions": regions,
         "last_errors": [],

@@ -1,7 +1,7 @@
 /*!
  * Streaming Tops for Lampa
  * File name intentionally remains netflix-top10.js so existing install URLs do not change.
- * Version: 2.2.0
+ * Version: 2.3.0
  *
  * Daily rankings: FlixPatrol public TOP 10 pages, read by the free Jina Reader proxy.
  * Posters/metadata: Lampa built-in TMDB source (no extra TMDB key).
@@ -12,7 +12,7 @@
     if (window.streaming_tops_v2_ready) return;
     window.streaming_tops_v2_ready = true;
 
-    var VERSION = '2.2.0';
+    var VERSION = '2.3.0';
     var COMPONENT = 'streaming_tops';
     var SETTINGS_COMPONENT = 'streaming_tops_settings';
     var REGION_KEY = 'streaming_tops_region';
@@ -79,6 +79,7 @@
     var VIEW_LABELS = {
         all: 'Все',
         hot: '🔥 Сейчас',
+        justwatch: 'JustWatch',
         netflix: 'Netflix',
         hbo_max: 'HBO Max',
         prime_video: 'Prime Video',
@@ -184,6 +185,11 @@
 
     function availableNavViews(region) {
         var result = ['all', 'hot'];
+
+        if (region && region.services && region.services.justwatch_weekly) {
+            result.push('justwatch');
+        }
+
         var seen = {};
 
         SERVICE_ORDER.forEach(function (key) {
@@ -599,6 +605,22 @@
         };
     }
 
+    function brandMark(view) {
+        var marks = {
+            all: '<span class="streaming-brand streaming-brand--all">◉</span>',
+            hot: '<span class="streaming-brand streaming-brand--hot">🔥</span>',
+            justwatch: '<span class="streaming-brand streaming-brand--jw">JW</span>',
+            netflix: '<span class="streaming-brand streaming-brand--netflix">N</span>',
+            hbo_max: '<span class="streaming-brand streaming-brand--max">max</span>',
+            prime_video: '<span class="streaming-brand streaming-brand--prime">prime</span>',
+            apple_tv: '<span class="streaming-brand streaming-brand--apple">tv+</span>',
+            disney_plus: '<span class="streaming-brand streaming-brand--disney">Disney+</span>',
+            paramount_plus: '<span class="streaming-brand streaming-brand--paramount">P+</span>'
+        };
+
+        return marks[view] || '';
+    }
+
     function navRow(region, activeView) {
         var views = availableNavViews(region);
 
@@ -609,6 +631,7 @@
                 return {
                     title: VIEW_LABELS[view] || view,
                     streaming_nav: true,
+                    streaming_nav_mark: brandMark(view),
                     streaming_view: view,
                     streaming_active: view === activeView,
                     params: {
@@ -797,6 +820,138 @@
         return defs;
     }
 
+    function buildJustWatchDefs(region) {
+        var defs = [];
+        var data = region.services && region.services.justwatch_weekly;
+        if (!data || !data.charts) return defs;
+
+        ['movies', 'tv'].forEach(function (chartKey) {
+            var list = data.charts[chartKey] || [];
+            if (!list.length) return;
+
+            defs.push(
+                makeDef(
+                    'justwatch_weekly',
+                    data,
+                    chartKey,
+                    chartKey === 'movies'
+                        ? '🏆 JustWatch Global · Top 10 фильмов недели'
+                        : '🏆 JustWatch Global · Top 10 сериалов недели',
+                    list
+                )
+            );
+        });
+
+        return defs;
+    }
+
+    var DOC_MODE_LABELS = {
+        movies: '🎥 Фильмы',
+        tv: '📺 Сериалы',
+        crime: '🔎 Crime',
+        history: '🏛 History',
+        music: '🎵 Music',
+        sport: '🏅 Sport',
+        war: '🎖 War'
+    };
+
+    function documentaryActionRow(region, serviceView) {
+        var serviceData = region.services && region.services[serviceView];
+        var docs = serviceData && serviceData.documentaries;
+        if (!docs) return null;
+
+        var actions = [];
+
+        if (docs.movies && docs.movies.length) actions.push('movies');
+        if (docs.tv && docs.tv.length) actions.push('tv');
+
+        Object.keys(docs.categories || {}).forEach(function (key) {
+            if (docs.categories[key] && docs.categories[key].length) {
+                actions.push(key);
+            }
+        });
+
+        if (!actions.length) return null;
+
+        return {
+            title: '📚 Документалки · открыть каталог',
+            streaming_doc_nav_line: true,
+            results: actions.map(function (mode) {
+                return {
+                    title: DOC_MODE_LABELS[mode] || mode,
+                    streaming_doc_action: true,
+                    streaming_doc_service: serviceView,
+                    streaming_doc_mode: mode,
+                    params: {
+                        style: { name: 'wide' }
+                    }
+                };
+            })
+        };
+    }
+
+    function docsItems(region, serviceView, mode) {
+        var serviceData = region.services && region.services[serviceView];
+        var docs = serviceData && serviceData.documentaries;
+        if (!docs) return [];
+
+        if (mode === 'movies') return docs.movies || [];
+        if (mode === 'tv') return docs.tv || [];
+
+        return (docs.categories && docs.categories[mode]) || [];
+    }
+
+    function docsKind(mode) {
+        if (mode === 'movies') return 'movie';
+        if (mode === 'tv') return 'tv';
+        return 'multi';
+    }
+
+    function openDocs(serviceView, mode) {
+        Lampa.Activity.push({
+            url: '',
+            title: 'Документалки',
+            component: COMPONENT,
+            streaming_view: serviceView,
+            streaming_docs: true,
+            streaming_doc_service: serviceView,
+            streaming_doc_mode: mode || 'movies',
+            page: 1
+        });
+    }
+
+    function buildDocsRows(region, serviceView, mode, callback) {
+        var nav = documentaryActionRow(region, serviceView);
+        var items = docsItems(region, serviceView, mode);
+        var meta = serviceMeta(serviceView);
+
+        resolveList(
+            items,
+            docsKind(mode),
+            serviceView,
+            'documentary',
+            function (cards) {
+                cards.forEach(function (card) {
+                    card.streaming_browse = true;
+                    card.streaming_rank = 0;
+                });
+
+                var rows = [];
+                if (nav) rows.push(nav);
+
+                rows.push({
+                    title:
+                        '📚 ' + meta.name + ' · ' +
+                        (DOC_MODE_LABELS[mode] || 'Документалки') +
+                        ' · ' + String(cards.length),
+                    results: cards
+                });
+
+                callback(rows);
+            }
+        );
+    }
+
     function makeMixedItems(region) {
         var serviceBases = [
             'netflix',
@@ -910,6 +1065,18 @@
 
         var first = navRow(ctx.region, ctx.view);
 
+        if (object && object.streaming_docs) {
+            buildDocsRows(
+                ctx.region,
+                object.streaming_doc_service || ctx.view,
+                object.streaming_doc_mode || 'movies',
+                function (docRows) {
+                    callback([first].concat(docRows));
+                }
+            );
+            return;
+        }
+
         if (ctx.view === 'hot') {
             resolveMixedList(makeMixedItems(ctx.region), function (cards) {
                 callback([
@@ -924,12 +1091,28 @@
             return;
         }
 
-        var defs = ctx.view === 'all'
-            ? buildOverviewDefs(ctx.region)
-            : buildDedicatedDefs(ctx.region, ctx.view);
+        var defs;
+        if (ctx.view === 'all') {
+            defs = buildOverviewDefs(ctx.region);
+        } else if (ctx.view === 'justwatch') {
+            defs = buildJustWatchDefs(ctx.region);
+        } else {
+            defs = buildDedicatedDefs(ctx.region, ctx.view);
+        }
 
         resolveDefs(defs, function (rows) {
-            callback([first].concat(rows));
+            var result = [first].concat(rows);
+
+            if (
+                ctx.view !== 'all' &&
+                ctx.view !== 'justwatch' &&
+                ctx.view !== 'hot'
+            ) {
+                var docsRow = documentaryActionRow(ctx.region, ctx.view);
+                if (docsRow) result.push(docsRow);
+            }
+
+            callback(result);
         });
     }
 
@@ -1070,6 +1253,26 @@
             if (!node.find('.streaming-nav-pill').length) {
                 node.append(
                     '<div class="streaming-nav-pill">' +
+                    (data.streaming_nav_mark || '') +
+                    '<span class="streaming-nav-label">' +
+                    String(data.title || '') +
+                    '</span>' +
+                    '</div>'
+                );
+            }
+        });
+    }
+
+    function applyDocActionCard(cardInstance, data) {
+        if (!data || !data.streaming_doc_action || !cardInstance) return;
+
+        decorateCardNode(cardInstance, function (node) {
+            node.addClass('streaming-doc-action-card');
+            node.children().not('.streaming-doc-action-pill').css('display', 'none');
+
+            if (!node.find('.streaming-doc-action-pill').length) {
+                node.append(
+                    '<div class="streaming-doc-action-pill">' +
                     String(data.title || '') +
                     '</div>'
                 );
@@ -1126,8 +1329,21 @@
                             return;
                         }
 
+                        if (data && data.streaming_doc_action) {
+                            applyDocActionCard(card, data);
+
+                            card.use({
+                                onlyEnter: function () {
+                                    openDocs(
+                                        data.streaming_doc_service,
+                                        data.streaming_doc_mode
+                                    );
+                                }
+                            });
+                            return;
+                        }
+
                         applyRankBadge(card, data);
-                        applyMixedServiceBadge(card, data);
 
                         card.use({
                             onlyEnter: function () {
@@ -1192,8 +1408,18 @@
                         return;
                     }
 
+                    if (data.streaming_doc_action) {
+                        applyDocActionCard(card, data);
+                        card.onEnter = function () {
+                            openDocs(
+                                data.streaming_doc_service,
+                                data.streaming_doc_mode
+                            );
+                        };
+                        return;
+                    }
+
                     applyRankBadge(card, data);
-                    applyMixedServiceBadge(card, data);
 
                     card.onEnter = function () {
                         openFull(data);
@@ -1317,8 +1543,64 @@
                 'display:flex!important;' +
                 'align-items:center!important;' +
                 'justify-content:center!important;' +
+                'gap:.48em!important;' +
                 'box-sizing:border-box!important;' +
                 'font-size:.92em!important;' +
+                'font-weight:700!important;' +
+                'white-space:nowrap!important;' +
+                'pointer-events:none!important;' +
+            '}' +
+
+            '.streaming-brand{' +
+                'display:inline-flex!important;' +
+                'align-items:center!important;' +
+                'justify-content:center!important;' +
+                'min-width:1.65em!important;' +
+                'height:1.65em!important;' +
+                'padding:0 .28em!important;' +
+                'border-radius:.38em!important;' +
+                'box-sizing:border-box!important;' +
+                'font-size:.82em!important;' +
+                'font-weight:900!important;' +
+                'line-height:1!important;' +
+                'color:#fff!important;' +
+                'background:#202020!important;' +
+            '}' +
+            '.streaming-brand--netflix{color:#e50914!important;background:rgba(0,0,0,.88)!important;font-size:1.05em!important}' +
+            '.streaming-brand--max{background:#4f35d2!important}' +
+            '.streaming-brand--prime{background:#1399d6!important;font-size:.66em!important}' +
+            '.streaming-brand--apple{background:#111!important}' +
+            '.streaming-brand--disney{background:#113ccf!important;font-size:.62em!important}' +
+            '.streaming-brand--paramount{background:#1261aa!important}' +
+            '.streaming-brand--jw{background:#fbc500!important;color:#111!important}' +
+            '.streaming-brand--hot{background:transparent!important;padding:0!important;font-size:1.15em!important}' +
+            '.streaming-brand--all{background:rgba(255,255,255,.16)!important}' +
+
+            '.streaming-doc-action-card{' +
+                'width:auto!important;' +
+                'min-width:9em!important;' +
+                'height:3.1em!important;' +
+                'margin-right:.55em!important;' +
+                'border-radius:.7em!important;' +
+                'background:rgba(255,255,255,.075)!important;' +
+                'border:1px solid rgba(255,255,255,.10)!important;' +
+                'overflow:hidden!important;' +
+                'box-sizing:border-box!important;' +
+            '}' +
+            '.streaming-doc-action-card.focus{' +
+                'background:#fff!important;' +
+                'color:#111!important;' +
+                'transform:scale(1.035)!important;' +
+            '}' +
+            '.streaming-doc-action-pill{' +
+                'width:100%!important;' +
+                'height:100%!important;' +
+                'padding:0 1.1em!important;' +
+                'display:flex!important;' +
+                'align-items:center!important;' +
+                'justify-content:center!important;' +
+                'box-sizing:border-box!important;' +
+                'font-size:.9em!important;' +
                 'font-weight:700!important;' +
                 'white-space:nowrap!important;' +
                 'pointer-events:none!important;' +
