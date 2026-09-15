@@ -1,7 +1,7 @@
 /*!
  * Streaming Tops for Lampa
  * File name intentionally remains netflix-top10.js so existing install URLs do not change.
- * Version: 2.3.0
+ * Version: 2.4.0
  *
  * Daily rankings: FlixPatrol public TOP 10 pages, read by the free Jina Reader proxy.
  * Posters/metadata: Lampa built-in TMDB source (no extra TMDB key).
@@ -12,7 +12,7 @@
     if (window.streaming_tops_v2_ready) return;
     window.streaming_tops_v2_ready = true;
 
-    var VERSION = '2.3.0';
+    var VERSION = '2.4.0';
     var COMPONENT = 'streaming_tops';
     var SETTINGS_COMPONENT = 'streaming_tops_settings';
     var REGION_KEY = 'streaming_tops_region';
@@ -87,6 +87,44 @@
         disney_plus: 'Disney+',
         paramount_plus: 'Paramount+'
     };
+
+    var FILTER_LABELS = {
+        overview: 'Обзор',
+        top10: 'Top 10',
+        movies: 'Фильмы',
+        tv: 'Сериалы',
+        doc: 'Документалки',
+        cmy: 'Комедия',
+        drm: 'Драма',
+        trl: 'Триллер',
+        crm: 'Криминал',
+        scf: 'Sci-Fi',
+        hrr: 'Ужасы',
+        act: 'Action',
+        ani: 'Animation',
+        fml: 'Family',
+        rma: 'Romance',
+        fnt: 'Fantasy'
+    };
+
+    var FILTER_ORDER = [
+        'overview',
+        'top10',
+        'movies',
+        'tv',
+        'doc',
+        'cmy',
+        'drm',
+        'trl',
+        'crm',
+        'scf',
+        'hrr',
+        'act',
+        'ani',
+        'fml',
+        'rma',
+        'fnt'
+    ];
 
     var ICON =
         '<svg width="34" height="34" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">' +
@@ -167,6 +205,36 @@
     function currentView(object) {
         var value = object && object.streaming_view ? object.streaming_view : homeView();
         return VIEW_LABELS[value] ? value : 'all';
+    }
+
+    function currentFilter(object) {
+        var value = object && object.streaming_filter
+            ? object.streaming_filter
+            : 'overview';
+
+        return FILTER_LABELS[value] ? value : 'overview';
+    }
+
+    function isServiceView(view) {
+        return [
+            'netflix',
+            'hbo_max',
+            'prime_video',
+            'apple_tv',
+            'disney_plus',
+            'paramount_plus'
+        ].indexOf(view) !== -1;
+    }
+
+    function openServiceFilter(serviceView, filter) {
+        Lampa.Activity.push({
+            url: '',
+            title: VIEW_LABELS[serviceView] || 'Streaming',
+            component: COMPONENT,
+            streaming_view: serviceView,
+            streaming_filter: filter || 'overview',
+            page: 1
+        });
     }
 
     function baseServiceKey(key) {
@@ -845,43 +913,98 @@
         return defs;
     }
 
-    var DOC_MODE_LABELS = {
-        movies: '🎥 Фильмы',
-        tv: '📺 Сериалы',
-        crime: '🔎 Crime',
-        history: '🏛 History',
-        music: '🎵 Music',
-        sport: '🏅 Sport',
-        war: '🎖 War'
-    };
+    function itemHasGenre(item, code) {
+        var genres = item && item.genres ? item.genres : [];
 
-    function documentaryActionRow(region, serviceView) {
-        var serviceData = region.services && region.services[serviceView];
-        var docs = serviceData && serviceData.documentaries;
-        if (!docs) return null;
-
-        var actions = [];
-
-        if (docs.movies && docs.movies.length) actions.push('movies');
-        if (docs.tv && docs.tv.length) actions.push('tv');
-
-        Object.keys(docs.categories || {}).forEach(function (key) {
-            if (docs.categories[key] && docs.categories[key].length) {
-                actions.push(key);
+        for (var i = 0; i < genres.length; i++) {
+            var genre = genres[i] || {};
+            if (String(genre.code || '').toLowerCase() === String(code || '').toLowerCase()) {
+                return true;
             }
+        }
+
+        return false;
+    }
+
+    function providerCatalog(serviceData, type) {
+        var catalogs = serviceData && serviceData.catalogs;
+        if (!catalogs) return [];
+
+        return (catalogs[type] || []).slice();
+    }
+
+    function filteredCatalog(serviceData, type, filter) {
+        var list = providerCatalog(serviceData, type);
+
+        if (
+            filter === 'movies' ||
+            filter === 'tv'
+        ) {
+            return list;
+        }
+
+        return list.filter(function (item) {
+            return itemHasGenre(item, filter);
+        });
+    }
+
+    function availableFilters(serviceData, isNetflix) {
+        var result = [];
+
+        FILTER_ORDER.forEach(function (filter) {
+            if (filter === 'overview') {
+                result.push(filter);
+                return;
+            }
+
+            if (filter === 'top10') {
+                // Netflix has an official Top 10; other providers still get
+                // their JustWatch provider Top 10.
+                result.push(filter);
+                return;
+            }
+
+            if (filter === 'movies') {
+                if (providerCatalog(serviceData, 'movies').length) result.push(filter);
+                return;
+            }
+
+            if (filter === 'tv') {
+                if (providerCatalog(serviceData, 'tv').length) result.push(filter);
+                return;
+            }
+
+            var hasGenre =
+                filteredCatalog(serviceData, 'movies', filter).length ||
+                filteredCatalog(serviceData, 'tv', filter).length;
+
+            if (hasGenre) result.push(filter);
         });
 
-        if (!actions.length) return null;
+        return result;
+    }
+
+    function subnavRow(region, serviceView, activeFilter) {
+        var serviceData = region.services && region.services[serviceView];
+        if (!serviceData) return null;
+
+        var filters = availableFilters(
+            serviceData,
+            serviceView === 'netflix'
+        );
+
+        if (!filters.length) return null;
 
         return {
-            title: '📚 Документалки · открыть каталог',
-            streaming_doc_nav_line: true,
-            results: actions.map(function (mode) {
+            title: VIEW_LABELS[serviceView] || serviceView,
+            streaming_subnav_line: true,
+            results: filters.map(function (filter) {
                 return {
-                    title: DOC_MODE_LABELS[mode] || mode,
-                    streaming_doc_action: true,
-                    streaming_doc_service: serviceView,
-                    streaming_doc_mode: mode,
+                    title: FILTER_LABELS[filter] || filter,
+                    streaming_subnav: true,
+                    streaming_service_view: serviceView,
+                    streaming_filter: filter,
+                    streaming_active: filter === activeFilter,
                     params: {
                         style: { name: 'wide' }
                     }
@@ -890,66 +1013,112 @@
         };
     }
 
-    function docsItems(region, serviceView, mode) {
+    function browseRowsForFilter(region, serviceView, filter) {
         var serviceData = region.services && region.services[serviceView];
-        var docs = serviceData && serviceData.documentaries;
-        if (!docs) return [];
+        if (!serviceData) return [];
 
-        if (mode === 'movies') return docs.movies || [];
-        if (mode === 'tv') return docs.tv || [];
-
-        return (docs.categories && docs.categories[mode]) || [];
-    }
-
-    function docsKind(mode) {
-        if (mode === 'movies') return 'movie';
-        if (mode === 'tv') return 'tv';
-        return 'multi';
-    }
-
-    function openDocs(serviceView, mode) {
-        Lampa.Activity.push({
-            url: '',
-            title: 'Документалки',
-            component: COMPONENT,
-            streaming_view: serviceView,
-            streaming_docs: true,
-            streaming_doc_service: serviceView,
-            streaming_doc_mode: mode || 'movies',
-            page: 1
-        });
-    }
-
-    function buildDocsRows(region, serviceView, mode, callback) {
-        var nav = documentaryActionRow(region, serviceView);
-        var items = docsItems(region, serviceView, mode);
         var meta = serviceMeta(serviceView);
+        var movieItems = filteredCatalog(serviceData, 'movies', filter);
+        var tvItems = filteredCatalog(serviceData, 'tv', filter);
+        var rows = [];
 
-        resolveList(
-            items,
-            docsKind(mode),
-            serviceView,
-            'documentary',
-            function (cards) {
-                cards.forEach(function (card) {
-                    card.streaming_browse = true;
-                    card.streaming_rank = 0;
-                });
+        function browseDef(items, kind, title) {
+            if (!items.length) return;
 
-                var rows = [];
-                if (nav) rows.push(nav);
+            rows.push({
+                serviceKey: serviceView,
+                chartKey: 'browse',
+                kind: kind,
+                items: items.slice(0, 50),
+                title: title,
+                browse: true
+            });
+        }
 
-                rows.push({
-                    title:
-                        '📚 ' + meta.name + ' · ' +
-                        (DOC_MODE_LABELS[mode] || 'Документалки') +
-                        ' · ' + String(cards.length),
-                    results: cards
-                });
+        if (filter === 'movies') {
+            browseDef(
+                movieItems,
+                'movie',
+                '🎬 ' + meta.name + ' · Фильмы'
+            );
+            return rows;
+        }
 
-                callback(rows);
-            }
+        if (filter === 'tv') {
+            browseDef(
+                tvItems,
+                'tv',
+                '📺 ' + meta.name + ' · Сериалы'
+            );
+            return rows;
+        }
+
+        var genreName = FILTER_LABELS[filter] || filter;
+
+        browseDef(
+            movieItems,
+            'movie',
+            '🎬 ' + genreName + ' · фильмы · ' + meta.name
         );
+
+        browseDef(
+            tvItems,
+            'tv',
+            '📺 ' + genreName + ' · сериалы · ' + meta.name
+        );
+
+        return rows;
+    }
+
+    function buildTop10Defs(region, serviceView) {
+        var defs = [];
+
+        if (serviceView === 'netflix') {
+            var official = region.services && region.services.netflix_official;
+
+            if (official && official.charts) {
+                ['movies', 'tv'].forEach(function (chartKey) {
+                    var list = official.charts[chartKey] || [];
+                    if (!list.length) return;
+
+                    defs.push(
+                        makeDef(
+                            'netflix_official',
+                            official,
+                            chartKey,
+                            chartKey === 'movies'
+                                ? '🏆 Netflix Official Top 10 · Фильмы'
+                                : '🏆 Netflix Official Top 10 · Сериалы',
+                            list
+                        )
+                    );
+                });
+            }
+
+            return defs;
+        }
+
+        var serviceData = region.services && region.services[serviceView];
+        if (!serviceData || !serviceData.charts) return defs;
+
+        ['movies', 'tv'].forEach(function (chartKey) {
+            var list = serviceData.charts[chartKey] || [];
+            if (!list.length) return;
+
+            defs.push(
+                makeDef(
+                    serviceView,
+                    serviceData,
+                    chartKey,
+                    chartKey === 'movies'
+                        ? 'Top 10 фильмов · JustWatch'
+                        : 'Top 10 сериалов · JustWatch',
+                    list
+                )
+            );
+        });
+
+        return defs;
     }
 
     function makeMixedItems(region) {
@@ -1043,6 +1212,13 @@
                 def.serviceKey,
                 def.chartKey,
                 function (cards) {
+                    if (def.browse) {
+                        cards.forEach(function (card) {
+                            card.streaming_rank = 0;
+                            card.streaming_browse = true;
+                        });
+                    }
+
                     rows[index] = {
                         title: def.title,
                         results: cards
@@ -1063,24 +1239,12 @@
             return;
         }
 
-        var first = navRow(ctx.region, ctx.view);
-
-        if (object && object.streaming_docs) {
-            buildDocsRows(
-                ctx.region,
-                object.streaming_doc_service || ctx.view,
-                object.streaming_doc_mode || 'movies',
-                function (docRows) {
-                    callback([first].concat(docRows));
-                }
-            );
-            return;
-        }
+        var topNav = navRow(ctx.region, ctx.view);
 
         if (ctx.view === 'hot') {
             resolveMixedList(makeMixedItems(ctx.region), function (cards) {
                 callback([
-                    first,
+                    topNav,
                     {
                         title: '🔥 Сейчас популярно · все сервисы',
                         streaming_mixed_line: true,
@@ -1091,29 +1255,55 @@
             return;
         }
 
-        var defs;
-        if (ctx.view === 'all') {
-            defs = buildOverviewDefs(ctx.region);
-        } else if (ctx.view === 'justwatch') {
-            defs = buildJustWatchDefs(ctx.region);
-        } else {
-            defs = buildDedicatedDefs(ctx.region, ctx.view);
+        if (ctx.view === 'justwatch') {
+            resolveDefs(buildJustWatchDefs(ctx.region), function (rows) {
+                callback([topNav].concat(rows));
+            });
+            return;
         }
 
-        resolveDefs(defs, function (rows) {
-            var result = [first].concat(rows);
+        if (ctx.view === 'all') {
+            resolveDefs(buildOverviewDefs(ctx.region), function (rows) {
+                callback([topNav].concat(rows));
+            });
+            return;
+        }
 
-            if (
-                ctx.view !== 'all' &&
-                ctx.view !== 'justwatch' &&
-                ctx.view !== 'hot'
-            ) {
-                var docsRow = documentaryActionRow(ctx.region, ctx.view);
-                if (docsRow) result.push(docsRow);
+        if (isServiceView(ctx.view)) {
+            var filter = currentFilter(object);
+            var secondNav = subnavRow(ctx.region, ctx.view, filter);
+            var prefixRows = secondNav ? [topNav, secondNav] : [topNav];
+
+            if (filter === 'overview') {
+                resolveDefs(
+                    buildDedicatedDefs(ctx.region, ctx.view),
+                    function (rows) {
+                        callback(prefixRows.concat(rows));
+                    }
+                );
+                return;
             }
 
-            callback(result);
-        });
+            if (filter === 'top10') {
+                resolveDefs(
+                    buildTop10Defs(ctx.region, ctx.view),
+                    function (rows) {
+                        callback(prefixRows.concat(rows));
+                    }
+                );
+                return;
+            }
+
+            resolveDefs(
+                browseRowsForFilter(ctx.region, ctx.view, filter),
+                function (rows) {
+                    callback(prefixRows.concat(rows));
+                }
+            );
+            return;
+        }
+
+        callback([topNav]);
     }
 
     function loadRows(object, success, error) {
@@ -1263,16 +1453,23 @@
         });
     }
 
-    function applyDocActionCard(cardInstance, data) {
-        if (!data || !data.streaming_doc_action || !cardInstance) return;
+    function applySubnavCard(cardInstance, data) {
+        if (!data || !data.streaming_subnav || !cardInstance) return;
 
         decorateCardNode(cardInstance, function (node) {
-            node.addClass('streaming-doc-action-card');
-            node.children().not('.streaming-doc-action-pill').css('display', 'none');
+            node.addClass('streaming-subnav-card');
 
-            if (!node.find('.streaming-doc-action-pill').length) {
+            if (data.streaming_active) {
+                node.addClass('streaming-subnav-card--active');
+            } else {
+                node.removeClass('streaming-subnav-card--active');
+            }
+
+            node.children().not('.streaming-subnav-pill').css('display', 'none');
+
+            if (!node.find('.streaming-subnav-pill').length) {
                 node.append(
-                    '<div class="streaming-doc-action-pill">' +
+                    '<div class="streaming-subnav-pill">' +
                     String(data.title || '') +
                     '</div>'
                 );
@@ -1329,14 +1526,14 @@
                             return;
                         }
 
-                        if (data && data.streaming_doc_action) {
-                            applyDocActionCard(card, data);
+                        if (data && data.streaming_subnav) {
+                            applySubnavCard(card, data);
 
                             card.use({
                                 onlyEnter: function () {
-                                    openDocs(
-                                        data.streaming_doc_service,
-                                        data.streaming_doc_mode
+                                    openServiceFilter(
+                                        data.streaming_service_view,
+                                        data.streaming_filter
                                     );
                                 }
                             });
@@ -1408,12 +1605,12 @@
                         return;
                     }
 
-                    if (data.streaming_doc_action) {
-                        applyDocActionCard(card, data);
+                    if (data.streaming_subnav) {
+                        applySubnavCard(card, data);
                         card.onEnter = function () {
-                            openDocs(
-                                data.streaming_doc_service,
-                                data.streaming_doc_mode
+                            openServiceFilter(
+                                data.streaming_service_view,
+                                data.streaming_filter
                             );
                         };
                         return;
@@ -1576,32 +1773,36 @@
             '.streaming-brand--hot{background:transparent!important;padding:0!important;font-size:1.15em!important}' +
             '.streaming-brand--all{background:rgba(255,255,255,.16)!important}' +
 
-            '.streaming-doc-action-card{' +
+            '.streaming-subnav-card{' +
                 'width:auto!important;' +
-                'min-width:9em!important;' +
-                'height:3.1em!important;' +
-                'margin-right:.55em!important;' +
-                'border-radius:.7em!important;' +
-                'background:rgba(255,255,255,.075)!important;' +
-                'border:1px solid rgba(255,255,255,.10)!important;' +
+                'min-width:8.5em!important;' +
+                'height:2.8em!important;' +
+                'margin-right:.48em!important;' +
+                'border-radius:.66em!important;' +
+                'background:rgba(255,255,255,.055)!important;' +
+                'border:1px solid rgba(255,255,255,.08)!important;' +
                 'overflow:hidden!important;' +
                 'box-sizing:border-box!important;' +
             '}' +
-            '.streaming-doc-action-card.focus{' +
+            '.streaming-subnav-card.focus{' +
                 'background:#fff!important;' +
                 'color:#111!important;' +
                 'transform:scale(1.035)!important;' +
             '}' +
-            '.streaming-doc-action-pill{' +
+            '.streaming-subnav-card--active{' +
+                'background:rgba(255,255,255,.14)!important;' +
+                'border-color:rgba(255,255,255,.30)!important;' +
+            '}' +
+            '.streaming-subnav-pill{' +
                 'width:100%!important;' +
                 'height:100%!important;' +
-                'padding:0 1.1em!important;' +
+                'padding:0 .95em!important;' +
                 'display:flex!important;' +
                 'align-items:center!important;' +
                 'justify-content:center!important;' +
                 'box-sizing:border-box!important;' +
-                'font-size:.9em!important;' +
-                'font-weight:700!important;' +
+                'font-size:.86em!important;' +
+                'font-weight:650!important;' +
                 'white-space:nowrap!important;' +
                 'pointer-events:none!important;' +
             '}';
