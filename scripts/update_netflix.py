@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Streaming Tops updater v2.4.1
+Streaming Tops updater v2.4.2
 
 Stable free sources:
 1) Netflix official weekly country charts:
@@ -177,7 +177,7 @@ def graphql(
         data=payload,
         headers={
             "Content-Type": "application/json",
-            "User-Agent": "streaming-tops-lampa/2.4.1",
+            "User-Agent": "streaming-tops-lampa/2.4.2",
             "Accept": "application/json",
         },
         method="POST",
@@ -339,6 +339,83 @@ def browse_copy(
         item["source_rank"] = item.get("rank", 0)
         item["rank"] = 0
         item["browse"] = True
+        result.append(item)
+
+    return result
+
+
+def title_identity(item: dict[str, Any]) -> str:
+    jw_id = str(item.get("justwatch_id") or "").strip()
+    if jw_id:
+        return "id:" + jw_id
+
+    return (
+        "title:"
+        + str(item.get("title") or "").strip().casefold()
+        + "|"
+        + str(item.get("year") or "")
+    )
+
+
+def build_new_releases(
+    movies: list[dict[str, Any]],
+    tv: list[dict[str, Any]],
+    documentary_movies: list[dict[str, Any]],
+    documentary_tv: list[dict[str, Any]],
+    limit: int = 30,
+) -> list[dict[str, Any]]:
+    """
+    Mixed "New releases" shelf:
+    - movies + series + documentaries together;
+    - newest release year first;
+    - within the same year, preserve JustWatch popularity order;
+    - de-duplicate titles that also appear in the documentary-specific query.
+
+    JustWatch's public popularTitles response gives originalReleaseYear but not
+    a stable exact provider-added date, so this shelf means recent releases
+    currently present in that provider's catalog, not "added to service today".
+    """
+    combined: list[dict[str, Any]] = []
+
+    for media_order, source in enumerate(
+        (movies, tv, documentary_movies, documentary_tv)
+    ):
+        for source_index, raw in enumerate(source):
+            item = dict(raw)
+            item["_media_order"] = media_order
+            item["_source_index"] = source_index
+            combined.append(item)
+
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+
+    for item in combined:
+        identity = title_identity(item)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(item)
+
+    unique.sort(
+        key=lambda item: (
+            -int(item.get("year") or 0),
+            int(item.get("rank") or 999),
+            int(item.get("_media_order") or 0),
+            int(item.get("_source_index") or 0),
+        )
+    )
+
+    result: list[dict[str, Any]] = []
+    for raw in unique[:limit]:
+        item = {
+            key: value
+            for key, value in raw.items()
+            if not key.startswith("_")
+        }
+        item["source_rank"] = item.get("rank", 0)
+        item["rank"] = 0
+        item["browse"] = True
+        item["new_release"] = True
         result.append(item)
 
     return result
@@ -514,6 +591,13 @@ def build_justwatch_region(region_key: str) -> dict[str, Any]:
                     "tv": browse_copy(documentary_tv, 100),
                 }
             },
+            "new_releases": build_new_releases(
+                movies_catalog,
+                tv_catalog,
+                documentary_movies,
+                documentary_tv,
+                limit=30,
+            ),
         }
 
     return {
@@ -670,7 +754,7 @@ def main() -> None:
     payload = {
         "schema": 4,
         "generated": True,
-        "version": "2.4.1",
+        "version": "2.4.2",
         "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "source": "Netflix Tudum + JustWatch public GraphQL + JustWatch streamingCharts",
         "source_note": (

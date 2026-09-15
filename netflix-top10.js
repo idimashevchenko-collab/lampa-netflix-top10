@@ -1,7 +1,7 @@
 /*!
  * Streaming Tops for Lampa
  * File name intentionally remains netflix-top10.js so existing install URLs do not change.
- * Version: 2.4.1
+ * Version: 2.4.2
  *
  * Daily rankings: FlixPatrol public TOP 10 pages, read by the free Jina Reader proxy.
  * Posters/metadata: Lampa built-in TMDB source (no extra TMDB key).
@@ -12,7 +12,7 @@
     if (window.streaming_tops_v2_ready) return;
     window.streaming_tops_v2_ready = true;
 
-    var VERSION = '2.4.1';
+    var VERSION = '2.4.2';
     var COMPONENT = 'streaming_tops';
     var SETTINGS_COMPONENT = 'streaming_tops_settings';
     var REGION_KEY = 'streaming_tops_region';
@@ -90,6 +90,7 @@
 
     var FILTER_LABELS = {
         overview: 'Обзор',
+        new: '🆕 Новинки',
         top10: 'Top 10',
         movies: 'Фильмы',
         tv: 'Сериалы',
@@ -109,6 +110,7 @@
 
     var FILTER_ORDER = [
         'overview',
+        'new',
         'top10',
         'movies',
         'tv',
@@ -974,6 +976,13 @@
                 return;
             }
 
+            if (filter === 'new') {
+                if (serviceData.new_releases && serviceData.new_releases.length) {
+                    result.push(filter);
+                }
+                return;
+            }
+
             if (filter === 'top10') {
                 // Netflix has an official Top 10; other providers still get
                 // their JustWatch provider Top 10.
@@ -1092,6 +1101,25 @@
         );
 
         return rows;
+    }
+
+    function buildNewReleasesDefs(region, serviceView) {
+        var serviceData = region.services && region.services[serviceView];
+        if (!serviceData) return [];
+
+        var list = (serviceData.new_releases || []).slice(0, 30);
+        if (!list.length) return [];
+
+        var meta = serviceMeta(serviceView);
+
+        return [{
+            serviceKey: serviceView,
+            chartKey: 'new',
+            kind: 'multi',
+            items: list,
+            title: '🆕 Новинки · ' + meta.name + ' · ' + String(list.length),
+            browse: true
+        }];
     }
 
     function buildTop10Defs(region, serviceView) {
@@ -1301,6 +1329,16 @@
             if (filter === 'overview') {
                 resolveDefs(
                     buildDedicatedDefs(ctx.region, ctx.view),
+                    function (rows) {
+                        callback(prefixRows.concat(rows));
+                    }
+                );
+                return;
+            }
+
+            if (filter === 'new') {
+                resolveDefs(
+                    buildNewReleasesDefs(ctx.region, ctx.view),
                     function (rows) {
                         callback(prefixRows.concat(rows));
                     }
