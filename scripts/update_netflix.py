@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Streaming Tops updater v2.1.0
+Streaming Tops updater v2.1.1
 
 Stable free sources:
 1) Netflix official weekly country charts:
@@ -52,83 +52,104 @@ SERVICE_MATCHERS = {
 }
 
 PACKAGES_QUERY = r"""
-query Packages($country: Country!) {
-  packages(country: $country, platform: WEB) {
+query GetProviders($country: Country!) {
+  packages(country: $country, platform: WEB, includeAddons: true) {
     id
     packageId
     clearName
     shortName
     technicalName
+    slug
   }
 }
 """
 
 POPULAR_QUERY = r"""
 query GetPopularTitles(
-  $country: Country!
-  $language: Language!
-  $filter: TitleFilter
-  $first: Int!
-  $sortBy: PopularTitlesSorting!
+  $popularTitlesFilter: TitleFilter,
+  $country: Country!,
+  $language: Language!,
+  $first: Int!,
+  $sortBy: PopularTitlesSorting!,
+  $offset: Int = 0
 ) {
   popularTitles(
     country: $country
-    filter: $filter
+    filter: $popularTitlesFilter
     first: $first
     sortBy: $sortBy
+    sortRandomSeed: 0
+    offset: $offset
   ) {
     edges {
+      cursor
       node {
-        __typename
-        ... on Movie {
-          id
-          objectType
-          content(country: $country, language: $language) {
-            title
-            originalReleaseYear
-          }
-        }
-        ... on Show {
-          id
-          objectType
-          content(country: $country, language: $language) {
-            title
-            originalReleaseYear
-          }
-        }
-        ... on Season {
-          id
-          objectType
-          content(country: $country, language: $language) {
-            title
-            originalReleaseYear
-          }
-        }
+        ...TitleDetails
       }
     }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+
+fragment TitleDetails on MovieOrShowOrSeasonOrEpisode {
+  id
+  objectType
+  content(country: $country, language: $language) {
+    title
+    originalReleaseYear
   }
 }
 """
 
 
-def graphql(query: str, variables: dict[str, Any]) -> dict[str, Any]:
-    payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
+def graphql(
+    operation_name: str,
+    query: str,
+    variables: dict[str, Any],
+) -> dict[str, Any]:
+    import urllib.error
+
+    payload = json.dumps({
+        "operationName": operation_name,
+        "query": query,
+        "variables": variables,
+    }).encode("utf-8")
+
     request = urllib.request.Request(
         JUSTWATCH_ENDPOINT,
         data=payload,
         headers={
             "Content-Type": "application/json",
-            "User-Agent": "streaming-tops-lampa/2.1.0",
+            "User-Agent": "streaming-tops-lampa/2.1.1",
             "Accept": "application/json",
         },
         method="POST",
     )
 
-    with urllib.request.urlopen(request, timeout=60) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+        raise RuntimeError(
+            f"JustWatch HTTP {exc.code} for {operation_name}: {body[:1500]}"
+        ) from exc
+
+    data = json.loads(raw)
 
     if data.get("errors"):
-        raise RuntimeError("JustWatch GraphQL: " + json.dumps(data["errors"], ensure_ascii=False))
+        raise RuntimeError(
+            "JustWatch GraphQL "
+            + operation_name
+            + ": "
+            + json.dumps(data["errors"], ensure_ascii=False)[:1500]
+        )
 
     return data.get("data") or {}
 
@@ -141,7 +162,7 @@ def package_text(pkg: dict[str, Any]) -> str:
 
 
 def find_packages(country: str) -> dict[str, str]:
-    data = graphql(PACKAGES_QUERY, {"country": country})
+    data = graphql("GetProviders", PACKAGES_QUERY, {"country": country})
     packages = data.get("packages") or []
 
     found: dict[str, str] = {}
@@ -174,7 +195,11 @@ def find_packages(country: str) -> dict[str, str]:
                     break
 
         if best:
-            found[service_key] = str(best.get("id") or best.get("shortName") or "")
+            # JustWatch TitleFilter.packages expects provider/package codes
+            # such as nfx/apv, not the opaque GraphQL node id (cGF8...).
+            code = str(best.get("shortName") or "").strip()
+            if code:
+                found[service_key] = code
 
     return {k: v for k, v in found.items() if v}
 
@@ -189,20 +214,22 @@ def get_popular(
     variables = {
         "country": country,
         "language": "en",
-        "filter": {
+        "popularTitlesFilter": {
             "packages": [package_id],
+            "includeTitlesWithoutUrl": True,
             "objectTypes": object_types,
-            "monetizationTypes": ["FLATRATE"],
+            "releaseYear": {},
         },
         "first": count,
         "sortBy": sort_by,
+        "offset": 0,
     }
 
-    data = graphql(POPULAR_QUERY, variables)
+    data = graphql("GetPopularTitles", POPULAR_QUERY, variables)
     edges = ((data.get("popularTitles") or {}).get("edges") or [])
 
     rows: list[dict[str, Any]] = []
-    for index, edge in enumerate(edges[:count], start=1):
+    for edge in edges[:count]:
         node = (edge or {}).get("node") or {}
         content = node.get("content") or {}
         title = content.get("title")
@@ -397,7 +424,7 @@ def main() -> None:
     payload = {
         "schema": 4,
         "generated": True,
-        "version": "2.1.0",
+        "version": "2.1.1",
         "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "source": "Netflix Tudum + JustWatch public GraphQL",
         "source_note": (
