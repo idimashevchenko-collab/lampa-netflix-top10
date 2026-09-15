@@ -1,0 +1,19 @@
+{
+  "schema": 2,
+  "generated": false,
+  "source": "Netflix Tudum Top 10",
+  "source_url": "https://www.netflix.com/tudum/top10",
+  "latest_country_week": null,
+  "latest_global_week": null,
+  "countries": {},
+  "global": {
+    "week": null,
+    "groups": {
+      "films_english": [],
+      "films_non_english": [],
+      "tv_english": [],
+      "tv_non_english": []
+    }
+  },
+  "note": "Run the GitHub Action 'Update Netflix Top 10' once after uploading the repository."
+}
