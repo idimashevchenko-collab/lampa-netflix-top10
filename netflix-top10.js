@@ -1,7 +1,7 @@
 /*!
  * Streaming Tops for Lampa
  * File name intentionally remains netflix-top10.js so existing install URLs do not change.
- * Version: 2.0.0
+ * Version: 2.1.0
  *
  * Daily rankings: FlixPatrol public TOP 10 pages, read by the free Jina Reader proxy.
  * Posters/metadata: Lampa built-in TMDB source (no extra TMDB key).
@@ -12,7 +12,7 @@
     if (window.streaming_tops_v2_ready) return;
     window.streaming_tops_v2_ready = true;
 
-    var VERSION = '2.0.0';
+    var VERSION = '2.1.0';
     var COMPONENT = 'streaming_tops';
     var SETTINGS_COMPONENT = 'streaming_tops_settings';
     var REGION_KEY = 'streaming_tops_region';
@@ -21,10 +21,15 @@
 
     var REGIONS = {
         UA: 'Украина',
-        WORLD: 'Мир'
+        WORLD: 'США'
     };
 
     var SERVICES = {
+        netflix_official: {
+            name: 'Netflix',
+            prefix: '🔴',
+            setting: 'streaming_tops_show_netflix'
+        },
         netflix: {
             name: 'Netflix',
             prefix: '🔴',
@@ -58,6 +63,7 @@
     };
 
     var SERVICE_ORDER = [
+        'netflix_official',
         'netflix',
         'hbo_max',
         'prime_video',
@@ -513,14 +519,15 @@
             if (!serviceData || !serviceData.charts) return;
 
             var meta = SERVICES[serviceKey] || { name: serviceKey, prefix: '▶' };
-            var scopeText = regionKey === 'WORLD' ? 'Мир' : 'Украина';
+            var scopeText = regionKey === 'WORLD' ? 'США' : 'Украина';
 
             if (serviceData.scope === 'world_fallback') {
-                scopeText = 'Мир · локального чарта для Украины нет';
+                scopeText = 'США · локального каталога для Украины нет';
             }
 
             var stale = serviceData.stale ? ' · данные предыдущего обновления' : '';
             var date = serviceData.date ? ' · ' + dateLabel(serviceData.date) : '';
+            var sourceLabel = serviceData.source_label ? ' · ' + serviceData.source_label : '';
 
             ['movies', 'tv', 'overall'].forEach(function (chartKey) {
                 var list = serviceData.charts[chartKey] || [];
@@ -534,6 +541,7 @@
                     title:
                         meta.prefix + ' ' + meta.name +
                         ' · ' + chartLabel(chartKey) +
+                        sourceLabel +
                         ' · ' + scopeText + date + stale
                 });
             });
@@ -864,8 +872,11 @@
                 }
             );
 
+            var settingsAdded = {};
             SERVICE_ORDER.forEach(function (key) {
                 var service = SERVICES[key];
+                if (settingsAdded[service.setting]) return;
+                settingsAdded[service.setting] = true;
 
                 addSelectSetting(
                     SETTINGS_COMPONENT,

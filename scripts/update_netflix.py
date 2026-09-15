@@ -1,497 +1,414 @@
 #!/usr/bin/env python3
 """
-Streaming Tops updater v2.0.2
+Streaming Tops updater v2.1.0
 
-Free sources:
-  FlixPatrol public aggregate Streaming TOP 10 pages
-    -> Jina Reader first
-    -> direct FlixPatrol fallback
-    -> data/top10.json
+Stable free sources:
+1) Netflix official weekly country charts:
+   https://www.netflix.com/tudum/top10/data/all-weeks-countries.tsv
 
-Why aggregate pages:
-- only 2 source pages are needed: Ukraine + World;
-- they contain sections for multiple streaming services;
-- far fewer anonymous Jina requests;
-- no separate-service URL/slugs have to succeed independently.
+2) Current provider popularity / trending:
+   JustWatch public GraphQL endpoint:
+   https://apis.justwatch.com/graphql
 
-The old filename update_netflix.py is intentionally preserved.
+No paid API keys.
+
+Important:
+- "Netflix • Official weekly" is the real Netflix weekly country chart.
+- JustWatch rows are explicitly labelled JustWatch; they are NOT claimed to
+  be the in-app proprietary daily ranking of Netflix/HBO/etc.
+- WORLD bucket in the JSON/UI represents US provider popularity, not a fake
+  global JustWatch ranking.
 """
 
 from __future__ import annotations
 
-import copy
+import csv
+import io
 import json
 import re
-import time
 import urllib.request
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "data" / "top10.json"
 
-UA_SLUG = "ukraine"
-WORLD_SLUG = "world"
+JUSTWATCH_ENDPOINT = "https://apis.justwatch.com/graphql"
+NETFLIX_TSV = "https://www.netflix.com/tudum/top10/data/all-weeks-countries.tsv"
 
-SERVICES = {
-    "netflix": {"name": "Netflix"},
-    "hbo_max": {"name": "HBO Max"},
-    "prime_video": {"name": "Prime Video"},
-    "apple_tv": {"name": "Apple TV"},
-    "disney_plus": {"name": "Disney+"},
-    "paramount_plus": {"name": "Paramount+"},
+REGIONS = {
+    "UA": {"jw_country": "UA", "name": "Украина"},
+    "WORLD": {"jw_country": "US", "name": "США"},
 }
 
-HEADING_RE = re.compile(r"^(#{1,4})\s+(.+?)\s*$")
-RANK_RE = re.compile(r"^\s*(\d{1,2})\.")
-TITLE_LINK_RE = re.compile(
-    r"\[([^\]]+)\]\(https?://(?:www\.)?flixpatrol\.com/title/[^)]+\)",
-    re.IGNORECASE,
-)
-ANY_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
-COMPACT_RE = re.compile(
-    r"^(\d{1,2})\.[^[]*"
-    r"\[([^\]]+)\]"
-    r"\(https?://(?:www\.)?flixpatrol\.com/title/[^)]+\)",
-    re.IGNORECASE,
-)
-
-CHANGE_RE = re.compile(r"^(?:[+\-]\d+|n/?a|–|—|-)$", re.IGNORECASE)
-DAYS_RE = re.compile(r"^\d+\s*(?:d|day|days)$", re.IGNORECASE)
-NUMERIC_RE = re.compile(r"^[\d,\.\s]+$")
-
-MONTHS = {
-    "January": 1, "February": 2, "March": 3, "April": 4,
-    "May": 5, "June": 6, "July": 7, "August": 8,
-    "September": 9, "October": 10, "November": 11, "December": 12,
+SERVICE_MATCHERS = {
+    "netflix": [r"\bnetflix\b"],
+    "hbo_max": [r"\bhbo max\b", r"\bmax\b"],
+    "prime_video": [r"amazon prime video", r"\bprime video\b"],
+    "apple_tv": [r"apple tv\+", r"apple tv plus", r"\bapple tv\b"],
+    "disney_plus": [r"disney\+", r"disney plus"],
+    "paramount_plus": [r"paramount\+", r"paramount plus"],
 }
-DATE_RE = re.compile(
-    r"\bon\s+"
-    r"(January|February|March|April|May|June|July|August|September|October|November|December)"
-    r"\s+(\d{1,2}),\s+(\d{4})\b",
-    re.IGNORECASE,
-)
+
+PACKAGES_QUERY = r"""
+query Packages($country: Country!) {
+  packages(country: $country, platform: WEB) {
+    id
+    packageId
+    clearName
+    shortName
+    technicalName
+  }
+}
+"""
+
+POPULAR_QUERY = r"""
+query GetPopularTitles(
+  $country: Country!
+  $language: Language!
+  $filter: TitleFilter
+  $first: Int!
+  $sortBy: PopularTitlesSorting!
+) {
+  popularTitles(
+    country: $country
+    filter: $filter
+    first: $first
+    sortBy: $sortBy
+  ) {
+    edges {
+      node {
+        __typename
+        ... on Movie {
+          id
+          objectType
+          content(country: $country, language: $language) {
+            title
+            originalReleaseYear
+          }
+        }
+        ... on Show {
+          id
+          objectType
+          content(country: $country, language: $language) {
+            title
+            originalReleaseYear
+          }
+        }
+        ... on Season {
+          id
+          objectType
+          content(country: $country, language: $language) {
+            title
+            originalReleaseYear
+          }
+        }
+      }
+    }
+  }
+}
+"""
 
 
-def load_previous() -> dict[str, Any]:
-    try:
-        data = json.loads(OUT.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and int(data.get("schema", 0)) >= 4:
-            return data
-    except Exception:
-        pass
-    return {}
+def graphql(query: str, variables: dict[str, Any]) -> dict[str, Any]:
+    payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
+    request = urllib.request.Request(
+        JUSTWATCH_ENDPOINT,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "streaming-tops-lampa/2.1.0",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(request, timeout=60) as response:
+        data = json.loads(response.read().decode("utf-8"))
+
+    if data.get("errors"):
+        raise RuntimeError("JustWatch GraphQL: " + json.dumps(data["errors"], ensure_ascii=False))
+
+    return data.get("data") or {}
 
 
-def clean_md(value: str) -> str:
-    value = ANY_LINK_RE.sub(lambda m: m.group(1), value)
-    value = value.replace("**", "").replace("__", "")
-    return re.sub(r"\s+", " ", value).strip(" \t|")
+def package_text(pkg: dict[str, Any]) -> str:
+    return " ".join(
+        str(pkg.get(key) or "")
+        for key in ("clearName", "technicalName", "shortName", "id")
+    ).lower()
 
 
-def page_date(text: str) -> str:
-    m = DATE_RE.search(text[:15000])
-    if not m:
-        return ""
-    try:
-        return date(int(m.group(3)), MONTHS[m.group(1).capitalize()], int(m.group(2))).isoformat()
-    except Exception:
-        return ""
+def find_packages(country: str) -> dict[str, str]:
+    data = graphql(PACKAGES_QUERY, {"country": country})
+    packages = data.get("packages") or []
+
+    found: dict[str, str] = {}
+
+    for service_key, patterns in SERVICE_MATCHERS.items():
+        best = None
+        for pkg in packages:
+            text = package_text(pkg)
+
+            if service_key == "hbo_max" and "cinemax" in text:
+                continue
+            if service_key == "apple_tv" and "apple tv store" in text:
+                continue
+
+            if any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns):
+                best = pkg
+                # exact clearName-ish matches are preferred
+                clear = str(pkg.get("clearName") or "").lower()
+                if service_key == "netflix" and clear == "netflix":
+                    break
+                if service_key == "hbo_max" and "hbo max" in clear:
+                    break
+                if service_key == "prime_video" and "amazon prime video" in clear:
+                    break
+                if service_key == "apple_tv" and ("apple tv+" in clear or "apple tv plus" in clear):
+                    break
+                if service_key == "disney_plus" and "disney" in clear:
+                    break
+                if service_key == "paramount_plus" and "paramount" in clear:
+                    break
+
+        if best:
+            found[service_key] = str(best.get("id") or best.get("shortName") or "")
+
+    return {k: v for k, v in found.items() if v}
 
 
-def service_from_heading(text: str) -> str | None:
-    low = clean_md(text).lower()
+def get_popular(
+    country: str,
+    package_id: str,
+    object_types: list[str],
+    sort_by: str,
+    count: int = 10,
+) -> list[dict[str, Any]]:
+    variables = {
+        "country": country,
+        "language": "en",
+        "filter": {
+            "packages": [package_id],
+            "objectTypes": object_types,
+            "monetizationTypes": ["FLATRATE"],
+        },
+        "first": count,
+        "sortBy": sort_by,
+    }
 
-    # Apple TV Store is TVOD and is intentionally not the Apple TV SVOD service.
-    if "apple tv store" in low:
-        return None
+    data = graphql(POPULAR_QUERY, variables)
+    edges = ((data.get("popularTitles") or {}).get("edges") or [])
 
-    if "netflix" in low:
-        return "netflix"
-    if "hbo max" in low:
-        return "hbo_max"
-    if "amazon prime video" in low or "amazon prime" in low or "prime video" in low:
-        return "prime_video"
-    if "apple tv" in low:
-        return "apple_tv"
-    if "disney+" in low or "disney plus" in low:
-        return "disney_plus"
-    if "paramount+" in low or "paramount plus" in low:
-        return "paramount_plus"
-    return None
-
-
-def chart_from_heading(text: str) -> str | None:
-    low = clean_md(text).lower()
-
-    if "kids" in low or "ranked" in low or "by day" in low or "by country" in low:
-        return None
-    if "tv show" in low or "tv shows" in low or "series" in low:
-        return "tv"
-    if "movie" in low or "movies" in low or "films" in low:
-        return "movies"
-    if "overall" in low:
-        return "overall"
-    return None
-
-
-def extract_title(line: str) -> str:
-    line = line.strip()
-
-    compact = COMPACT_RE.match(line)
-    if compact:
-        return clean_md(compact.group(2))
-
-    linked = TITLE_LINK_RE.search(line)
-    if linked:
-        return clean_md(linked.group(1))
-
-    cells = [clean_md(x) for x in line.split("|")]
-    cells = [x for x in cells if x]
-    if not cells:
-        return ""
-
-    # Remove rank cell.
-    if re.fullmatch(r"\d{1,2}\.", cells[0]):
-        cells = cells[1:]
-
-    # FlixPatrol country rows have a change column.
-    if cells and CHANGE_RE.fullmatch(cells[0]):
-        cells = cells[1:]
-
-    for cell in cells:
-        if not cell:
-            continue
-        if CHANGE_RE.fullmatch(cell):
-            continue
-        if DAYS_RE.fullmatch(cell):
-            continue
-        if NUMERIC_RE.fullmatch(cell):
-            continue
-        if cell.lower() in {"overview", "full details"}:
-            continue
-        return cell
-
-    return ""
-
-
-def extract_rows(lines: list[str]) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    seen_exact: set[tuple[int, str]] = set()
-
-    for raw in lines:
-        line = raw.strip()
-        m = RANK_RE.match(line)
-        if not m:
-            continue
-
-        rank = int(m.group(1))
-        if not 1 <= rank <= 10:
-            continue
-
-        title = extract_title(line)
+    rows: list[dict[str, Any]] = []
+    for index, edge in enumerate(edges[:count], start=1):
+        node = (edge or {}).get("node") or {}
+        content = node.get("content") or {}
+        title = content.get("title")
         if not title:
             continue
 
-        sig = (rank, title)
-        if sig in seen_exact:
-            continue
-        seen_exact.add(sig)
-
-        result.append({
-            "rank": rank,
+        rows.append({
+            "rank": len(rows) + 1,
             "title": title,
             "search_title": title,
+            "year": content.get("originalReleaseYear"),
+            "justwatch_id": node.get("id"),
         })
 
-    result.sort(key=lambda x: x["rank"])
-    return result[:10]
+    return rows
 
 
-def parse_aggregate(markdown: str) -> tuple[str, dict[str, Any]]:
-    lines = markdown.splitlines()
-    date_value = page_date(markdown)
+def build_justwatch_region(region_key: str) -> dict[str, Any]:
+    region = REGIONS[region_key]
+    country = region["jw_country"]
+    packages = find_packages(country)
 
-    headings: list[tuple[int, int, str]] = []
-    for i, line in enumerate(lines):
-        m = HEADING_RE.match(line.strip())
-        if m:
-            headings.append((i, len(m.group(1)), m.group(2).strip()))
+    print(f"[JustWatch {country}] packages:", packages)
 
     services: dict[str, Any] = {}
-    active_service: str | None = None
 
-    for pos, (line_index, level, heading_text) in enumerate(headings):
-        found_service = service_from_heading(heading_text)
-        found_chart = chart_from_heading(heading_text)
+    for service_key, package_id in packages.items():
+        print(f"[JustWatch {country}] {service_key} ({package_id})")
 
-        # Country aggregate:
-        #   ## Netflix TOP 10 in Ukraine...
-        #   ### TOP 10 Movies
-        # World aggregate:
-        #   ## TOP TV Shows on Netflix...
-        if found_service and not found_chart:
-            active_service = found_service
+        movies = get_popular(country, package_id, ["MOVIE"], "POPULAR")
+        tv = get_popular(country, package_id, ["SHOW"], "POPULAR")
+        hot = get_popular(country, package_id, ["MOVIE", "SHOW"], "TRENDING")
+
+        if not (movies or tv or hot):
             continue
 
-        service_key = found_service or active_service
-        chart_key = found_chart
-
-        if not service_key or not chart_key:
-            continue
-
-        # Stop at the next heading of the same or higher level.
-        end = len(lines)
-        for next_index, next_level, _ in headings[pos + 1:]:
-            if next_level <= level:
-                end = next_index
-                break
-
-        rows = extract_rows(lines[line_index + 1:end])
-        if not rows:
-            continue
-
-        service = services.setdefault(service_key, {
-            "name": SERVICES[service_key]["name"],
-            "date": date_value,
-            "charts": {"movies": [], "tv": [], "overall": []},
-        })
-
-        # Prefer the fuller section if the same chart appears twice.
-        if len(rows) > len(service["charts"].get(chart_key, [])):
-            service["charts"][chart_key] = rows
-
-    return date_value, services
-
-
-def target_urls(region_slug: str) -> list[str]:
-    base = f"https://flixpatrol.com/top10/streaming/{region_slug}/"
-    today = datetime.now(timezone.utc).date()
-
-    # Current alias first; then explicit recent dates.
-    urls = [base]
-    for days_back in range(0, 4):
-        d = today - timedelta(days=days_back)
-        urls.append(f"{base}{d.isoformat()}/")
-
-    # preserve order, remove duplicates
-    return list(dict.fromkeys(urls))
-
-
-def http_get(url: str, via_jina: bool) -> str:
-    fetch_url = f"https://r.jina.ai/{url}" if via_jina else url
-
-    headers = {
-        "User-Agent": "streaming-tops-lampa/2.0.2 (+https://github.com/)",
-        "Accept": "text/plain" if via_jina else "text/html,application/xhtml+xml,*/*",
-    }
-    if via_jina:
-        headers["X-Return-Format"] = "markdown"
-
-    req = urllib.request.Request(fetch_url, headers=headers)
-    with urllib.request.urlopen(req, timeout=70 if via_jina else 35) as response:
-        raw = response.read()
-
-    return raw.decode("utf-8", errors="replace")
-
-
-def content_looks_useful(text: str, region_slug: str) -> bool:
-    if len(text.strip()) < 200:
-        return False
-    if "Page Not Found" in text:
-        return False
-
-    # We intentionally do not require one exact title sentence. The aggregate
-    # page only needs a recognisable streaming/Top 10 heading + ranked rows.
-    has_top = bool(re.search(r"TOP\s+10|TOP\s+(?:TV Shows|Movies)", text, re.IGNORECASE))
-    has_region = (
-        "Ukraine" in text if region_slug == UA_SLUG
-        else bool(re.search(r"\bWorld\b|\bWorldwide\b", text, re.IGNORECASE))
-    )
-    has_ranks = bool(re.search(r"(?m)^\s*1\.", text))
-
-    return has_top and has_region and has_ranks
-
-
-def fetch_region(region_slug: str) -> tuple[str, dict[str, Any], str]:
-    errors: list[str] = []
-
-    # Jina first. We try explicit dates too because root aliases occasionally
-    # return a non-target response from a cache/proxy.
-    for target in target_urls(region_slug):
-        for via_jina in (True, False):
-            transport = "Jina" if via_jina else "direct"
-            try:
-                print(f"  trying {transport}: {target}")
-                text = http_get(target, via_jina=via_jina)
-
-                if not content_looks_useful(text, region_slug):
-                    errors.append(f"{transport} invalid content: {target}")
-                    continue
-
-                date_value, services = parse_aggregate(text)
-                if services:
-                    return date_value, services, target
-
-                errors.append(f"{transport} parsed zero services: {target}")
-            except Exception as exc:
-                errors.append(f"{transport} {target}: {exc}")
-
-            # Keep anonymous requests gentle.
-            if via_jina:
-                time.sleep(2.2)
-
-    raise RuntimeError("; ".join(errors[-8:]))
-
-
-def previous_region(previous: dict[str, Any], key: str) -> dict[str, Any] | None:
-    try:
-        region = previous["regions"][key]
-        if isinstance(region, dict) and region.get("services"):
-            return copy.deepcopy(region)
-    except Exception:
-        pass
-    return None
-
-
-def add_source_metadata(
-    services: dict[str, Any],
-    scope: str,
-    source_url: str,
-    stale: bool = False,
-) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-
-    for key, raw in services.items():
-        if key not in SERVICES:
-            continue
-
-        item = copy.deepcopy(raw)
-        item["scope"] = scope
-        item["source_url"] = source_url
-        item["stale"] = stale
-
-        for chart_key, rows in (item.get("charts") or {}).items():
-            for row in rows:
-                row["source_url"] = source_url
-
-        out[key] = item
-
-    return out
-
-
-def build() -> dict[str, Any]:
-    previous = load_previous()
-    errors: list[str] = []
-
-    ua_region = None
-    world_region = None
-
-    print("[UA] Fetching aggregate Streaming page...")
-    try:
-        ua_date, ua_services, ua_source = fetch_region(UA_SLUG)
-        ua_region = {
-            "name": "Украина",
-            "date": ua_date,
-            "services": add_source_metadata(ua_services, "local", ua_source),
+        services[service_key] = {
+            "name": service_key,
+            "date": datetime.now(timezone.utc).date().isoformat(),
+            "scope": "local" if region_key == "UA" else "world",
+            "source_label": "JustWatch",
+            "source_url": f"https://www.justwatch.com/{'ua' if country == 'UA' else 'us'}",
+            "stale": False,
+            "charts": {
+                "movies": movies,
+                "tv": tv,
+                "overall": hot,
+            },
         }
-        print("  OK services:", ", ".join(ua_region["services"].keys()))
-    except Exception as exc:
-        msg = f"UA aggregate: {exc}"
-        print("  WARNING", msg)
-        errors.append(msg)
-        ua_region = previous_region(previous, "UA")
-        if ua_region:
-            for item in ua_region.get("services", {}).values():
-                item["stale"] = True
-
-    print("[WORLD] Fetching aggregate Streaming page...")
-    try:
-        world_date, world_services, world_source = fetch_region(WORLD_SLUG)
-        world_region = {
-            "name": "Мир",
-            "date": world_date,
-            "services": add_source_metadata(world_services, "world", world_source),
-        }
-        print("  OK services:", ", ".join(world_region["services"].keys()))
-    except Exception as exc:
-        msg = f"WORLD aggregate: {exc}"
-        print("  WARNING", msg)
-        errors.append(msg)
-        world_region = previous_region(previous, "WORLD")
-        if world_region:
-            for item in world_region.get("services", {}).values():
-                item["stale"] = True
-
-    if world_region is None and ua_region is None:
-        raise RuntimeError(
-            "Both aggregate pages failed and there is no previous Streaming Tops data."
-        )
-
-    if world_region is None:
-        world_region = {"name": "Мир", "services": {}}
-
-    if ua_region is None:
-        ua_region = {"name": "Украина", "services": {}}
-
-    # For services without a Ukraine local chart, explicitly use World.
-    for service_key in ("disney_plus", "paramount_plus"):
-        if service_key not in ua_region["services"]:
-            world_item = world_region["services"].get(service_key)
-            if world_item:
-                fallback = copy.deepcopy(world_item)
-                fallback["scope"] = "world_fallback"
-                fallback["note"] = (
-                    "Локального рейтинга Украины для этого сервиса нет; "
-                    "показан мировой рейтинг."
-                )
-                ua_region["services"][service_key] = fallback
-
-    # If a normally local service temporarily disappears from the Ukraine
-    # aggregate, prefer yesterday's local data; only then use World.
-    old_ua = previous_region(previous, "UA") or {"services": {}}
-    for service_key in ("netflix", "hbo_max", "prime_video", "apple_tv"):
-        if service_key in ua_region["services"]:
-            continue
-
-        old_item = old_ua.get("services", {}).get(service_key)
-        if old_item and old_item.get("scope") == "local":
-            fallback = copy.deepcopy(old_item)
-            fallback["stale"] = True
-            ua_region["services"][service_key] = fallback
-            continue
-
-        world_item = world_region["services"].get(service_key)
-        if world_item:
-            fallback = copy.deepcopy(world_item)
-            fallback["scope"] = "world_fallback"
-            fallback["note"] = (
-                "Локальный рейтинг Украины временно недоступен; "
-                "показан мировой рейтинг."
-            )
-            ua_region["services"][service_key] = fallback
 
     return {
-        "schema": 4,
-        "generated": True,
-        "version": "2.0.2",
-        "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
-        "source": "FlixPatrol public aggregate Streaming TOP 10",
-        "source_note": (
-            "Two aggregate pages are fetched (Ukraine and World), preferably "
-            "through Jina Reader with direct FlixPatrol fallback."
-        ),
-        "regions": {
-            "UA": ua_region,
-            "WORLD": world_region,
-        },
-        "last_errors": errors[-20:],
+        "name": region["name"],
+        "services": services,
     }
+
+
+def download_text(url: str) -> str:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; StreamingTopsLampa/2.1)",
+            "Accept": "text/tab-separated-values,text/plain,*/*",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=120) as response:
+        return response.read().decode("utf-8-sig")
+
+
+def parse_tsv(text: str) -> list[dict[str, str]]:
+    return [
+        {str(k).strip(): (v or "").strip() for k, v in row.items()}
+        for row in csv.DictReader(io.StringIO(text), delimiter="\t")
+    ]
+
+
+def pick(row: dict[str, str], *keys: str) -> str:
+    for key in keys:
+        value = row.get(key, "")
+        if value:
+            return value.strip()
+    return ""
+
+
+def as_int(value: str, default: int = 0) -> int:
+    try:
+        return int(float(str(value).replace(",", "").strip()))
+    except Exception:
+        return default
+
+
+def build_netflix_official() -> dict[str, dict[str, Any]]:
+    rows = parse_tsv(download_text(NETFLIX_TSV))
+    weeks = [pick(row, "week") for row in rows if pick(row, "week")]
+    latest = max(weeks)
+
+    by_country: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        if pick(row, "week") != latest:
+            continue
+
+        iso = pick(row, "country_iso2", "country_code").upper()
+        if iso not in {"UA", "US"}:
+            continue
+
+        category = pick(row, "category").lower()
+        if category == "films":
+            chart = "movies"
+        elif category == "tv":
+            chart = "tv"
+        else:
+            continue
+
+        show_title = pick(row, "show_title", "title")
+        if not show_title:
+            continue
+
+        season_title = pick(row, "season_title")
+        display_title = show_title
+
+        # Preserve Netflix's season distinction in the source rows, while
+        # search_title remains the base show for TMDB matching.
+        if season_title and season_title.upper() not in {"N/A", "NA"}:
+            display_title = f"{show_title} — {season_title}"
+
+        item = {
+            "rank": as_int(pick(row, "weekly_rank", "rank"), 999),
+            "title": display_title,
+            "search_title": show_title,
+        }
+
+        country = by_country.setdefault(
+            iso,
+            {"movies": [], "tv": []},
+        )
+        country[chart].append(item)
+
+    for country in by_country.values():
+        country["movies"] = sorted(country["movies"], key=lambda x: x["rank"])[:10]
+        country["tv"] = sorted(country["tv"], key=lambda x: x["rank"])[:10]
+
+    result = {}
+    for iso, charts in by_country.items():
+        result[iso] = {
+            "name": "Netflix",
+            "date": latest,
+            "scope": "local",
+            "source_label": "официальный Top 10 недели",
+            "source_url": "https://www.netflix.com/tudum/top10",
+            "stale": False,
+            "charts": {
+                "movies": charts["movies"],
+                "tv": charts["tv"],
+                "overall": [],
+            },
+        }
+
+    return result
 
 
 def main() -> None:
-    payload = build()
+    print("Fetching official Netflix weekly Top 10...")
+    netflix_official = build_netflix_official()
+
+    regions = {}
+
+    for region_key in ("UA", "WORLD"):
+        print("Building", region_key)
+        region = build_justwatch_region(region_key)
+
+        iso = "UA" if region_key == "UA" else "US"
+        if iso in netflix_official:
+            # Insert official Netflix first.
+            services = {"netflix_official": netflix_official[iso]}
+            services.update(region["services"])
+            region["services"] = services
+
+        regions[region_key] = region
+
+    # If services unavailable in UA but available in US, explicitly fallback.
+    ua_services = regions["UA"]["services"]
+    us_services = regions["WORLD"]["services"]
+
+    for key in ("hbo_max", "prime_video", "apple_tv", "disney_plus", "paramount_plus"):
+        if key not in ua_services and key in us_services:
+            fallback = json.loads(json.dumps(us_services[key]))
+            fallback["scope"] = "world_fallback"
+            fallback["source_label"] = "JustWatch"
+            fallback["note"] = "Нет локального каталога/рейтинга JustWatch для Украины; показан США."
+            ua_services[key] = fallback
+
+    payload = {
+        "schema": 4,
+        "generated": True,
+        "version": "2.1.0",
+        "updated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "source": "Netflix Tudum + JustWatch public GraphQL",
+        "source_note": (
+            "Netflix official rows are weekly country charts. "
+            "JustWatch rows represent current provider popularity/trending "
+            "and are not claimed to be proprietary in-app daily rankings."
+        ),
+        "regions": regions,
+        "last_errors": [],
+    }
+
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
@@ -499,8 +416,8 @@ def main() -> None:
     )
 
     print("Wrote", OUT)
-    print("UA:", ", ".join(payload["regions"]["UA"]["services"].keys()) or "(none)")
-    print("WORLD:", ", ".join(payload["regions"]["WORLD"]["services"].keys()) or "(none)")
+    print("UA services:", ", ".join(regions["UA"]["services"].keys()))
+    print("US services:", ", ".join(regions["WORLD"]["services"].keys()))
 
 
 if __name__ == "__main__":
